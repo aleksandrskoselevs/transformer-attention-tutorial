@@ -1,3 +1,5 @@
+**Fork of [greentfrapp/attention-primer](https://github.com/greentfrapp/attention-primer) with Tensorflow code replaced with PyTorch. All credit goes to @greentfrapp**
+
 # attention-primer
 
 Some toy tasks/experiments to illustrate the concept of attention in machine learning, with heavy reference to [Vaswani et al. (2017)](https://arxiv.org/abs/1706.03762). In particular, we see how attention can be used in place of RNNs and CNNs for modeling sequences. 
@@ -10,11 +12,11 @@ This is still work-in-progress and feedback is appreciated!
 
 **Tasks/Experiments**
 
-1. [Counting Letters](https://github.com/greentfrapp/attention-primer/tree/master/1_counting-letters) - Simple implementation of attention and tutorial on queries, keys and values
-2. [Difference](https://github.com/greentfrapp/attention-primer/tree/master/2_difference) - Demonstration of self-attention and using it for modeling intra-sequence dependencies
-3. [Signal](https://github.com/greentfrapp/attention-primer/tree/master/3_signal) - Demonstration of positional encodings
-4. [Signal 2](https://github.com/greentfrapp/attention-primer/tree/master/4_signal2) - Demonstration of multihead-attention
-5. [Translation](https://github.com/greentfrapp/attention-primer/tree/master/5_translation) - Demonstration of Transformer on translation
+1. [Counting Letters](1_counting-letters) - Simple implementation of attention and tutorial on queries, keys and values
+2. [Difference](2_difference) - Demonstration of self-attention and using it for modeling intra-sequence dependencies
+3. [Signal](3_signal) - Demonstration of positional encodings
+4. [Signal 2](4_signal2) - Demonstration of multihead-attention
+5. [Translation](5_translation) - Demonstration of Transformer on translation
 
 More details below.
 
@@ -27,7 +29,7 @@ More details below.
 ## Tasks/Experiments
 
 
-### [1 - Counting Letters](https://github.com/greentfrapp/attention-primer/tree/master/1_counting-letters)
+### [1 - Counting Letters](1_counting-letters)
 
 **In this task, we demonstrate a simplified form of attention and apply it to a counting task.**
 
@@ -75,9 +77,9 @@ Output step 2 attended mainly to Input steps: [2 3 6 7 8]
 
 For each output step, we see the learned attention being intuitively weighted on the relevant letters. In the above example, Output Step 0 counts the number of 'A's and attended mainly to Input Steps 0 and 1, which were the 'A's in the sequence.
 
-Refer to the task's [README](https://github.com/greentfrapp/attention-primer/tree/master/1_counting-letters) for more details.
+Refer to the task's [README](1_counting-letters) for more details.
 
-### [2 - Difference](https://github.com/greentfrapp/attention-primer/tree/master/2_difference)
+### [2 - Difference](2_difference)
 
 **In this task, we demonstrate self-attention and see how it is useful for modeling inter-token/intra-sequence dependency.**
 
@@ -144,9 +146,9 @@ In the Self-Attention weights, notice that Output Steps 0, 1 and 2 are generally
 
 However, Output Step 3 pays far less attention to itself (20%) and instead pays a lot of attention on Output Step 0 (70%) and a tiny bit of attention to Output Step 1 (6%). Very intuitive, given that Output Step 3 is supposed to show the difference between Output Steps 0 and 1.
 
-Refer to the task's [README](https://github.com/greentfrapp/attention-primer/tree/master/2_difference) for more details.
+Refer to the task's [README](2_difference) for more details.
 
-### [3 - Signal](https://github.com/greentfrapp/attention-primer/tree/master/3_signal)
+### [3 - Signal](3_signal)
 
 **In this task, we demonstrate the importance of positional encodings.**
 
@@ -202,9 +204,9 @@ We can also check the L2-Norm for each vector in the positional encoding, where 
 
 Here the L2-Norm of the positional vector is far larger for the first step (0.816) than for the rest of the input sequence (~0.18). This makes perfect sense, since the model should ideally modify the first step while leaving the rest of the sequence untouched.
 
-Refer to the task's [README](https://github.com/greentfrapp/attention-primer/tree/master/3_signal) for more details.
+Refer to the task's [README](3_signal) for more details.
 
-### [4 - Signal 2](https://github.com/greentfrapp/attention-primer/tree/master/4_signal2)
+### [4 - Signal 2](4_signal2)
 
 **In this task, we show the advantages afforded by multihead-attention.**
 
@@ -281,9 +283,9 @@ L2-Norm of Input Positional Encoding:
 
 The output shows three sets of attention, one for each step of the output sequence. For each step, there are also four subsets of attention, each corresponding to a head.
 
-Refer to the task's [README](https://github.com/greentfrapp/attention-primer/tree/master/4_signal2) for more details.
+Refer to the task's [README](4_signal2) for more details.
 
-### [4 - Signal 2](https://github.com/greentfrapp/attention-primer/tree/master/4_signal2)
+### [4 - Signal 2](4_signal2)
 
 **In this task, we demonstrate the Transformer model on a translation task.**
 
@@ -310,4 +312,4 @@ by the way that's <UNK> stuff
 
 Here the tokens `by the way` all attend strongly to `übrigens`, which is the German parallel for the English phrase. In addition, we also see that the English translation `<UNK> stuff` correctly flips the order of the German tokens `zeug <UNK>` (where `zeug` means `stuff`).
 
-Refer to the task's [README](https://github.com/greentfrapp/attention-primer/tree/master/5_translation) for more details.
+Refer to the task's [README](5_translation) for more details.
