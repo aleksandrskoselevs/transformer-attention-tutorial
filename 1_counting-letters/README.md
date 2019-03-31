@@ -49,7 +49,7 @@ For each output step, we see the learned attention being intuitively weighted on
 With the `--plot` flag we can also visualize the attention heatmap, which clearly shows the attention focused on the relevant characters for each output.
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/1_counting-letters/images/attention.png" alt="attention heatmap" width="400px" height="whatever" style="display: block;">
+<img src="images/attention.png" alt="attention heatmap" width="400px" height="whatever" style="display: block;">
 </div>
 
 Just as with a recurrent network, the trained model is able to take in variable sequence lengths, although performance definitely worsens when we deviate from the lengths used in the training set.
@@ -83,14 +83,8 @@ $ python3 main.py --test
 
 This tests the trained model (remember to specify the parameters if the trained model did not use default parameters).
 
-In particular, you can modify the test sample's length and also whether to plot the attention heatmap (defaults to False):
-
-- Sample length: `--sample_len=10`
+In particular, you can choose whether to plot the attention heatmap (defaults to False):
 - Plot: `--plot`
-
-A model trained with the default parameters works reasonably well with sample lengths of 9 to 11. Shorter or longer sequences will see significant degradation of performance. 
-
-Also, the model definitely cannot output counts larger than the `--max_len` parameter specified during training, since that is used to specify the number of units in the network for generating the logits.
 
 ### Help
 
@@ -160,19 +154,22 @@ Extract of the `attention` method from the `AttentionModel` class in the script:
 
 ```python3
 def attention(self, query, key, value):
-	# Equation 1 in Vaswani et al. (2017)
-	# 	Scaled dot product between Query and Keys
-	output = tf.matmul(query, key, transpose_b=True) / (tf.cast(tf.shape(query)[2], tf.float32) ** 0.5)
-	# 	Softmax to get attention weights
-	attention_weights = tf.nn.softmax(output)
-	# 	Multiply weights by Values
-	weighted_sum = tf.matmul(attention_weights, value)
-	# Following Figure 1 and Section 3.1 in Vaswani et al. (2017)
-	# 	Residual connection ie. add weighted sum to original query
-	output = weighted_sum + query
-	# 	Layer normalization
-	output = tf.nn.l2_normalize(output, dim=1)
-	return output, attention_weights
+    # Equation 1 in Vaswani et al. (2017)
+    # Scaled dot product between Query and Keys
+    scaling_factor = torch.tensor(np.sqrt(query.size()[2]))
+    output = torch.bmm(
+        query, key.transpose(1, 2)
+    ) / scaling_factor
+    # Softmax to get attention weights
+    attention_weights = F.softmax(output, dim=2)
+    # Multiply weights by Values
+    weighted_sum = torch.bmm(attention_weights, value)
+    # Following Figure 1 and Section 3.1 in Vaswani et al. (2017)
+    # Residual connection ie. add weighted sum to original query
+    output = weighted_sum + query
+    # Layer normalization
+    output = self.layer_norm(output)
+    return output, attention_weights
 ```
 
 Following the Transformer architecture by Vaswani et al. (2017), the weighted sum is added back to the **Query** via residual connections (Figure 1 and Section 3.1). The sum of **Query** and weighted sum is then layer-normalized and passed to the next step.
@@ -195,18 +192,13 @@ We want the first step of the output sequence to count the number of 'A's and th
 
 In that case, our **Queries** tensor will be of shape `(batch_size, vocab_size, hidden)`. `vocab_size` is the second dimension since we have one **Query** vector for each element in our vocabulary. `hidden` will be the dimension of each **Query** vector.
 
-We will let the model learn the **Queries** tensor, by initializing it as a trainable `tf.Variable`:
+We will let the model learn the **Queries** tensor, by initializing it as a trainable `nn.Parameter`:
 
 ```python3
-query = tf.Variable(
-	initial_value=np.zeros((1, self.vocab_size, self.hidden)),
-	trainable=True,
-	dtype=tf.float32,
-	name="query",
-)
+self.query = nn.Parameter(torch.zeros((1, self.vocab_size, self.hidden)))
 ```
 
-*Notice the first dimension for `decoder_query` in the code above is 1. This is because we will use `tf.tile` to change it to `batch_size` at runtime.*
+*Notice the first dimension for `decoder_query` in the code above is 1. This is because we will use `torch.repeat` to change it to `batch_size` at runtime.*
 
 **Keys and Values**
 
@@ -217,35 +209,23 @@ In fact, we just need one regular fully-connected feedforward network, to genera
 Like the **Queries** tensor, we set the output dimension for both networks to `hidden` where `hidden=64` by default. We then end up with a tensor of shape (1, 4, 64). Each 64-dim vector in the tensor acts as both **Key** and **Value** for each character. 
 
 ```python3
-key_val = tf.layers.dense(
-	inputs=self.input,
-	units=self.hidden,
-	activation=None,
-	name="key_val"
-)
+self.key_val_dense = nn.Linear(self.vocab_size + 1, self.hidden)
 ```
 
 **Decoding and Softmax**
 
 All that's left is then to compute the scaled dot-product attention, using the **Queries** tensor and the **Keys**/**Values** tensor.
 
-We then pass that to a regular feedforward network to get logits of `self.max_len + 1` dimensions and we just `tf.argmax` these logits to get the predictions.
+We then pass that to a regular feedforward network to get logits of `self.max_len + 1` dimensions and we just `torch.argmax` these logits to get the predictions.
 
 ```python3
 decoding, self.attention_weights = self.attention(
-	query=tf.tile(query, multiples=tf.concat(([tf.shape(self.input)[0]], [1], [1]), axis=0)),
-	key=key_val,
-	value=key_val,
-)
-
-self.logits = tf.layers.dense(
-	inputs=decoding,
-	units=self.max_len + 1,
-	activation=None,
-	name="decoding",
-)
-
-self.predictions = tf.argmax(self.logits, axis=2)
+    self.query.repeat(key_val.shape[0], 1, 1),
+    key_val,
+    key_val)
+self.final_dense = nn.Linear(self.hidden, self.max_len + 1)
+logits = self.final_dense(decoding)
+predictions = logits.argmax(dim=2)
 ```
 
 That's mainly it for the short and simplified demo of attention for the counting task!
@@ -253,7 +233,7 @@ That's mainly it for the short and simplified demo of attention for the counting
 Here's a summary figure for the algorithm used in this Task!
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/1_counting-letters/images/task_1.png" alt="task_1" width="800px" height="whatever" style="display: block;">
+<img src="images/task_1.png" alt="task_1" width="800px" height="whatever" style="display: block;">
 </div>
 
 ## Notes
@@ -262,4 +242,4 @@ If you look at the attention weights printed out when testing the model, you wil
 
 In the case of this toy experiment, the order of the input sequence does not matter, since we are just counting characters. But if the order is important, as with the output sequence here, we can use positional encodings, as used by Vaswani et al. (2017) (see Figure 1 and Section 3.5 of the paper).The idea here is to modify the input and output embeddings to help the model differentiate between steps. Vaswani et al. does this by simply adding sine and cosine functions to the embeddings. 
 
-In our case, while position is irrelevant for the input sequence, it is important for the output sequence ie. the meanings of the elements in the output sequence are represented almost entirely by their position eg. we know that the first element in the output counts the number of 'A's by the fact that it is the first element. So we actually do use positional encodings to differentiate between the output steps. Specifically, the **Queries** vector that is initialized as a trainable `tf.Variable` is our positional encoding for the output. In this case, we allow the model to learn its own positional encoding. 
+In our case, while position is irrelevant for the input sequence, it is important for the output sequence ie. the meanings of the elements in the output sequence are represented almost entirely by their position eg. we know that the first element in the output counts the number of 'A's by the fact that it is the first element. So we actually do use positional encodings to differentiate between the output steps. Specifically, the **Queries** vector that is initialized as a trainable `nn.Parameter` is our positional encoding for the output. In this case, we allow the model to learn its own positional encoding. 

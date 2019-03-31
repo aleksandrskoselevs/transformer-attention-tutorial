@@ -3,13 +3,18 @@ Task 1 - Counting Letters
 Simple implementation of attention and tutorial on queries, keys and values
 """
 
-import tensorflow as tf
-import numpy as np
+import os
 import string
+import numpy as np
 from absl import flags
 from absl import app
 import seaborn
 import matplotlib.pyplot as plt
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
 FLAGS = flags.FLAGS
 
@@ -32,7 +37,6 @@ flags.DEFINE_integer("hidden", 64, "Hidden dimension in model")
 # Task parameters
 flags.DEFINE_integer("max_len", 10, "Maximum input length from toy task")
 flags.DEFINE_integer("vocab_size", 3, "Size of input vocabulary, not including ' ' (null character)")
-flags.DEFINE_integer("sample_len", 10, "Use this parameter to change sequence length during testing")
 
 
 class Task(object):
@@ -54,148 +58,141 @@ class Task(object):
         dictionary = np.array(list(' ' + string.ascii_uppercase))
         return dictionary[idx]
 
-class AttentionModel(object):
 
-    def __init__(self, sess, sample_len=10, max_len=10, vocab_size=3, hidden=64, name="Counter"):
-        super(AttentionModel, self).__init__()
-        self.sess = sess
-        self.sample_len = sample_len
+class AttentionModel(nn.Module):
+    def __init__(self, max_len=10, vocab_size=3, hidden=64):
+        super().__init__()
+
         self.max_len = max_len
         self.vocab_size = vocab_size
         self.hidden = hidden
-        self.name = name
-        with tf.variable_scope(self.name):
-            self.build_model()
-            variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.name)
-            self.saver = tf.train.Saver(var_list=variables, max_to_keep=1)
 
-    def build_model(self):
+        self.query = nn.Parameter(
+            torch.zeros((1, self.vocab_size, self.hidden),
+                        requires_grad=True))
+        self.key_val_dense = nn.Linear(self.vocab_size + 1, self.hidden)
+        self.layer_norm = nn.LayerNorm(self.hidden)
+        self.final_dense = nn.Linear(self.hidden, self.max_len + 1)
 
-        self.input = tf.placeholder(
-            shape=(None, self.sample_len, self.vocab_size + 1),
-            dtype=tf.float32,
-            name="input",
-        )
-
-        self.labels = tf.placeholder(
-            shape=(None, self.vocab_size, self.max_len + 1),
-            dtype=tf.float32,
-            name="labels",
-        )
-
-        query = tf.Variable(
-            initial_value=np.zeros((1, self.vocab_size, self.hidden)),
-            trainable=True,
-            dtype=tf.float32,
-            name="query",
-        )
-
-        key_val = tf.layers.dense(
-            inputs=self.input,
-            units=self.hidden,
-            activation=None,
-            name="key_val"
-        )
-
+    def forward(self, x):
+        key_val = self.key_val_dense(x)
         decoding, self.attention_weights = self.attention(
-            query=tf.tile(query, multiples=tf.concat(([tf.shape(self.input)[0]], [1], [1]), axis=0)),
-            key=key_val,
-            value=key_val,
-        )
-
-        self.logits = tf.layers.dense(
-            inputs=decoding,
-            units=self.max_len + 1,
-            activation=None,
-            name="decoding",
-        )
-
-        self.predictions = tf.argmax(self.logits, axis=2)
-        self.loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=self.labels, logits=self.logits))
-        self.optimize = tf.train.AdamOptimizer(1e-2).minimize(self.loss)
+            self.query.repeat(key_val.shape[0], 1, 1),
+            key_val,
+            key_val)
+        logits = self.final_dense(decoding)
+        return logits, self.attention_weights
 
     def attention(self, query, key, value):
         # Equation 1 in Vaswani et al. (2017)
-        # 	Scaled dot product between Query and Keys
-        output = tf.matmul(query, key, transpose_b=True) / (tf.cast(tf.shape(query)[2], tf.float32) ** 0.5)
-        # 	Softmax to get attention weights
-        attention_weights = tf.nn.softmax(output)
-        # 	Multiply weights by Values
-        weighted_sum = tf.matmul(attention_weights, value)
+        # Scaled dot product between Query and Keys
+        scaling_factor = torch.tensor(np.sqrt(query.shape[2]))
+        output = torch.bmm(
+            query, key.transpose(1, 2)
+        ) / scaling_factor
+
+        # Softmax to get attention weights
+        attention_weights = F.softmax(output, dim=2)
+
+        # Multiply weights by Values
+        weighted_sum = torch.bmm(attention_weights, value)
+
         # Following Figure 1 and Section 3.1 in Vaswani et al. (2017)
-        # 	Residual connection ie. add weighted sum to original query
+        # Residual connection ie. add weighted sum to original query
         output = weighted_sum + query
-        # 	Layer normalization
-        output = tf.contrib.layers.layer_norm(output, begin_norm_axis=2)
+
+        # Layer normalization
+        output = self.layer_norm(output)
+
         return output, attention_weights
 
-    def save(self, savepath, global_step=None, prefix="ckpt", verbose=False):
-        if savepath[-1] != '/':
-            savepath += '/'
-        self.saver.save(self.sess, savepath + prefix, global_step=global_step)
-        if verbose:
-            print("Model saved to {}.".format(savepath + prefix + '-' + str(global_step)))
 
-    def load(self, savepath, verbose=False):
-        if savepath[-1] != '/':
-            savepath += '/'
-        ckpt = tf.train.latest_checkpoint(savepath)
-        self.saver.restore(self.sess, ckpt)
-        if verbose:
-            print("Model loaded from {}.".format(ckpt))
+def train(max_len=10,
+          vocab_size=3,
+          hidden=64,
+          batchsize=100,
+          steps=2000,
+          print_every=50,
+          savepath='models/'):
+
+    os.makedirs(savepath, exist_ok=True)
+    model = AttentionModel(max_len=max_len, vocab_size=vocab_size, hidden=hidden)
+    optimizer = optim.Adam(model.parameters(), lr=1e-2)
+    task = Task(max_len=max_len, vocab_size=vocab_size)
+
+    for i in np.arange(steps):
+        minibatch_x, minibatch_y = task.next_batch(batchsize=batchsize)
+        optimizer.zero_grad()
+        with torch.set_grad_enabled(True):
+            minibatch_x = torch.Tensor(minibatch_x)
+            minibatch_y = torch.Tensor(minibatch_y)
+            out, _ = model(minibatch_x)
+            loss = F.cross_entropy(
+                out.transpose(1, 2),
+                minibatch_y.argmax(dim=2))
+            loss.backward()
+            optimizer.step()
+        if (i + 1) % print_every == 0:
+            print("Iteration {} - Loss {}".format(i + 1, loss))
+
+    print("Iteration {} - Loss {}".format(i + 1, loss))
+    print("Training complete!")
+    torch.save(model.state_dict(), savepath + '/ckpt.pt')
+
+
+def test(max_len=10,
+         vocab_size=3,
+         hidden=64,
+         savepath='models/',
+         plot=True):
+
+    model = AttentionModel(max_len=max_len, vocab_size=vocab_size, hidden=hidden)
+    model.load_state_dict(torch.load(savepath + '/ckpt.pt'))
+    task = Task(max_len=max_len, vocab_size=vocab_size)
+
+    samples, labels = task.next_batch(batchsize=1)
+    print("\nInput: \n{}".format(task.prettify(samples)))
+    model.eval()
+    with torch.set_grad_enabled(False):
+        predictions, attention = model(torch.Tensor(samples))
+    predictions = predictions.detach().numpy()
+    predictions = predictions.argmax(axis=2)
+    attention = attention.detach().numpy()
+
+    print("\nPrediction: \n{}".format(predictions))
+    print("\nEncoder-Decoder Attention: ")
+    for i, output_step in enumerate(attention[0]):
+        print("Output step {} attended mainly to Input steps: {}".format(
+            i, np.where(output_step >= np.max(output_step))[0]))
+        print([float("{:.3f}".format(step)) for step in output_step])
+
+    if plot:
+        fig, ax = plt.subplots()
+        seaborn.heatmap(
+            attention[0],
+            yticklabels=["output_0", "output_1", "output_2"],
+            xticklabels=task.prettify(samples).reshape(-1),
+            ax=ax,
+            cmap='plasma',
+            cbar=True,
+            cbar_kws={"orientation": "horizontal"}
+        )
+        ax.set_aspect('equal')
+        for tick in ax.get_yticklabels():
+            tick.set_rotation(0)
+        plt.show()
+
 
 def main(unused_args):
-
     if FLAGS.train:
-        tf.gfile.MakeDirs(FLAGS.savepath)
-        with tf.Session() as sess:
-            model = AttentionModel(sess=sess, sample_len=FLAGS.max_len, max_len=FLAGS.max_len, vocab_size=FLAGS.vocab_size, hidden=FLAGS.hidden)
-            sess.run(tf.global_variables_initializer())
-            task = Task(max_len=FLAGS.max_len, vocab_size=FLAGS.vocab_size)
-            for i in np.arange(FLAGS.steps):
-                minibatch_x, minibatch_y = task.next_batch(batchsize=FLAGS.batchsize)
-                feed_dict = {
-                    model.input: minibatch_x,
-                    model.labels: minibatch_y,
-                }
-                _, loss = sess.run([model.optimize, model.loss], feed_dict)
-                if (i + 1) % FLAGS.save_every == 0:
-                    model.save(FLAGS.savepath, global_step=i + 1)
-                if (i + 1) % FLAGS.print_every == 0:
-                    print("Iteration {} - Loss {}".format(i + 1, loss))
-            print("Iteration {} - Loss {}".format(i + 1, loss))
-            print("Training complete!")
-            model.save(FLAGS.savepath, global_step=i + 1, verbose=True)
-
-    if FLAGS.test:
-        with tf.Session() as sess:
-            model = AttentionModel(sess=sess, sample_len=FLAGS.sample_len, max_len=FLAGS.max_len, vocab_size=FLAGS.vocab_size, hidden=FLAGS.hidden)
-            model.load(FLAGS.savepath)
-            task = Task(max_len=FLAGS.sample_len, vocab_size=FLAGS.vocab_size)
-            samples, labels = task.next_batch(batchsize=1)
-            print("\nInput: \n{}".format(task.prettify(samples)))
-            feed_dict = {
-                model.input: samples,
-            }
-            predictions, attention = sess.run([model.predictions, model.attention_weights], feed_dict)
-            print("\nPrediction: \n{}".format(predictions))
-            print("\nEncoder-Decoder Attention: ")
-            for i, output_step in enumerate(attention[0]):
-                print("Output step {} attended mainly to Input steps: {}".format(i, np.where(output_step >= np.max(output_step))[0]))
-                print([float("{:.3f}".format(step)) for step in output_step])
-
-            if FLAGS.plot:
-                fig, ax = plt.subplots()
-                seaborn.heatmap(
-                    attention[0],
-                    yticklabels=["output_0", "output_1", "output_2"],
-                    xticklabels=task.prettify(samples).reshape(-1),
-                    cbar=False,
-                    ax=ax,
-                )
-                ax.set_aspect('equal')
-                for tick in ax.get_yticklabels(): tick.set_rotation(0)
-                plt.show()
+        train(FLAGS.max_len, FLAGS.vocab_size, FLAGS.hidden,
+              FLAGS.batchsize, FLAGS.steps, FLAGS.print_every,
+              FLAGS.savepath)
+    elif FLAGS.test:
+        test(FLAGS.max_len, FLAGS.vocab_size, FLAGS.hidden,
+             FLAGS.savepath, FLAGS.plot)
+    else:
+        print('Specify train or test option')
 
 
 if __name__ == "__main__":

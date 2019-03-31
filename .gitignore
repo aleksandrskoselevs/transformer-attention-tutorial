@@ -62,3 +62,9 @@ docs/_build/
 
 # PyBuilder
 target/
+
+# Ignore environment
+.env
+
+# ignore jupyter temp files
+*.ipynb_checkpoints
