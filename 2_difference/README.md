@@ -71,7 +71,7 @@ More interestingly, we see that Output Step 3 actually attends to positions of b
 Just as in Task 1, we can also use the `--plot` flag to visualize the attention heatmap.
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/2_difference/images/enc_attention_noself.png" alt="encoder attention heatmap no self" width="400px" height="whatever" style="display: block;">
+<img src="images/enc_attention_noself.png" alt="encoder attention heatmap no self" width="400px" height="whatever" style="display: block;">
 </div>
 
 In other words, Output Step 3 can be modeled as being dependent on Output Steps 0 and 1. But it can also be modeled as simply being dependent on the inputs of Output Steps 0 and 1. With this simple example, we can see that although there is superficial inter-token dependence in the output, this can be reframed as input dependence. 
@@ -124,7 +124,7 @@ Attention of Output step 3:
 First, with `--self_att`, the Encoder-Decoder Attention weights for Output Step 3 is now much more evenly divided across all the input steps. Since we now allow the modelling of inter-token dependence in the output via self-attention, Output Step 3 can gather more information later from Output Steps 0 and 1.
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/2_difference/images/enc_attention_self.png" alt="encoder attention heatmap no self" width="400px" height="whatever" style="display: block;">
+<img src="images/enc_attention_self.png" alt="encoder attention heatmap no self" width="400px" height="whatever" style="display: block;">
 </div>
 
 *Attention heatmap of output steps on the input sequence.*
@@ -134,7 +134,7 @@ In the Self-Attention weights, notice that Output Steps 0, 1 and 2 are generally
 However, Output Step 3 pays far less attention to itself (37%) and instead pays a lot of attention to Output Step 1 (63%). 
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/2_difference/images/self_attention_self.png" alt="encoder attention heatmap no self" width="200px" height="whatever" style="display: block;">
+<img src="images/self_attention_self.png" alt="encoder attention heatmap no self" width="200px" height="whatever" style="display: block;">
 </div>
 
 *Self-attention heatmap of output steps.*
@@ -217,7 +217,7 @@ Here we will focus on explaining the self-attention part of the model. For the g
 This is an extract of the code that is run when `--self_att` is enabled.
 
 ```python3
-decoding, self.self_attention_weights = self.attention(
+decoding, self_attention_weights = self.attention(
 	query=decoding,
 	key=decoding,
 	value=decoding,
@@ -231,7 +231,7 @@ Actually, to be more accurate, the self-attention here could be described as att
 Here is one way to think about it. Let's explicitly term pre-self-attention `decoding` as `decoding_pre` and post-self-attention `decoding` as `decoding_post`. We can rewrite the above code snippet as: 
 
 ```python3
-decoding_post, self.self_attention_weights = self.attention(
+decoding_post, self_attention_weights = self.attention(
 	query=decoding_pre,
 	key=decoding_pre,
 	value=decoding_pre,
