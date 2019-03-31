@@ -128,9 +128,12 @@ def train(max_len=10,
     model = AttentionModel(max_len=max_len, vocab_size=vocab_size,
                            hidden=hidden, self_att=self_att)
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
+    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, patience=250, verbose=True)
     task = Task(max_len=max_len, vocab_size=vocab_size)
 
-    for i in np.arange(steps):
+    loss_hist = []
+    for i in range(steps):
         minibatch_x, minibatch_y = task.next_batch(batchsize=batchsize)
         optimizer.zero_grad()
         with torch.set_grad_enabled(True):
@@ -142,12 +145,15 @@ def train(max_len=10,
                 minibatch_y.argmax(dim=2))
             loss.backward()
             optimizer.step()
+            lr_scheduler.step(loss)
         if (i + 1) % print_every == 0:
             print("Iteration {} - Loss {}".format(i + 1, loss))
+        loss_hist.append(loss.detach().numpy())
 
     print("Iteration {} - Loss {}".format(i + 1, loss))
     print("Training complete!")
     torch.save(model.state_dict(), savepath + '/ckpt.pt')
+    return np.array(loss_hist)
 
 
 def test(max_len=10,
@@ -217,6 +223,7 @@ def test(max_len=10,
             for tick in ax2.get_yticklabels():
                 tick.set_rotation(0)
             plt.show()
+    return samples, labels, predictions, attention, self_attention
 
 
 def main(unused_args):

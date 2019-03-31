@@ -78,21 +78,25 @@ class AttentionModel(nn.Module):
         self.pos_enc = pos_enc
         self.num_enc_layers = num_enc_layers
 
-        self.layer_norm = nn.LayerNorm(self.hidden)
+        self.att_layer_norm = nn.LayerNorm(self.hidden)
         self.input_pos_enc = nn.Parameter(torch.zeros((1, self.max_len + 1, self.hidden)))
 
-        self.base_enc_layer = nn.Linear(self.vocab_size, self.hidden)
-        self.enc_layers = []
-        for i in range(self.num_enc_layers):
-            self.enc_layers.append([
-                nn.Linear(self.hidden, self.hidden * 2),
-                nn.Linear(self.hidden * 2, self.hidden)])
+        self.enc_base_dense = nn.Linear(self.vocab_size, self.hidden)
+        self.enc_increase_hidden = nn.ModuleList([
+            nn.Linear(self.hidden, self.hidden * 2)
+            for i in range(self.num_enc_layers)])
+        self.enc_decrease_hidden = nn.ModuleList([
+            nn.Linear(self.hidden * 2, self.hidden)
+            for i in range(self.num_enc_layers)])
+        self.enc_layer_norm = nn.ModuleList([
+            nn.LayerNorm(self.hidden)
+            for i in range(self.num_enc_layers)])
 
         self.decoder_input = nn.Parameter(torch.zeros((1, 1, self.hidden)))
         self.decoder_dense = nn.Linear(self.hidden, self.max_len + 1)
 
     def forward(self, x):
-        encoding = self.base_enc_layer(x)
+        encoding = self.enc_base_dense(x)
 
         if self.pos_enc:
             # Add positional encodings
@@ -100,9 +104,9 @@ class AttentionModel(nn.Module):
 
         for i in range(self.num_enc_layers):
             encoding, _ = self.attention(encoding, encoding, encoding)
-            dense = F.relu(self.enc_layers[i][0](encoding))
-            encoding = encoding + self.enc_layers[i][1](dense)
-            encoding = self.layer_norm(encoding)
+            dense = F.relu(self.enc_increase_hidden[i](encoding))
+            encoding = encoding + self.enc_decrease_hidden[i](dense)
+            encoding = self.enc_layer_norm[i](encoding)
 
         decoding, attention_weights = self.attention(
             self.decoder_input.repeat(x.shape[0], 1, 1),
@@ -131,7 +135,7 @@ class AttentionModel(nn.Module):
         output = weighted_sum + query
 
         # Layer normalization
-        output = self.layer_norm(output)
+        output = self.att_layer_norm(output)
 
         return output, attention_weights
 
@@ -151,9 +155,12 @@ def train(max_len=10,
                            hidden=hidden, pos_enc=pos_enc,
                            num_enc_layers=num_enc_layers)
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
+    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, patience=250, verbose=True)
     task = Task(max_len=max_len, vocab_size=vocab_size)
 
-    for i in np.arange(steps):
+    loss_hist = []
+    for i in range(steps):
         minibatch_x, minibatch_y = task.next_batch(batchsize=batchsize)
         optimizer.zero_grad()
         with torch.set_grad_enabled(True):
@@ -165,12 +172,15 @@ def train(max_len=10,
                 minibatch_y.argmax(dim=2))
             loss.backward()
             optimizer.step()
+            lr_scheduler.step(loss)
         if (i + 1) % print_every == 0:
             print("Iteration {} - Loss {}".format(i + 1, loss))
+        loss_hist.append(loss.detach().numpy())
 
     print("Iteration {} - Loss {}".format(i + 1, loss))
     print("Training complete!")
     torch.save(model.state_dict(), savepath + '/ckpt.pt')
+    return loss_hist
 
 
 def test(max_len=10,
@@ -238,11 +248,12 @@ def test(max_len=10,
                 cmap='plasma',
                 cbar=True,
                 cbar_kws={"orientation": "horizontal"})
-        ax2.set_aspect('equal')
-        ax2.set_title("Positional Encodings L2-Norm")
-        for tick in ax2.get_yticklabels():
-            tick.set_rotation(0)
-        plt.show()
+            ax2.set_aspect('equal')
+            ax2.set_title("Positional Encodings L2-Norm")
+            for tick in ax2.get_yticklabels():
+                tick.set_rotation(0)
+            plt.show()
+    return samples, labels, predictions, attention, input_pos_enc
 
 
 def main(unused_args):
