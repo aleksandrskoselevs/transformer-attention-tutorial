@@ -97,7 +97,7 @@ L2-Norm of Input Positional Encoding:
 In the above output, despite Input Steps 0, 3, 4, 6, 7, 9 all being 'B's, the decoder pays extra attention (24%) to Input Step 0.
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/3_signal/images/attention.png" alt="attention heatmap" width="400px" height="whatever" style="display: block;">
+<img src="images/attention.png" alt="attention heatmap" width="400px" height="whatever" style="display: block;">
 </div>
 
 *Attention heatmap of output steps on input sequence.*
@@ -105,7 +105,7 @@ In the above output, despite Input Steps 0, 3, 4, 6, 7, 9 all being 'B's, the de
 We can also check the L2-Norm for each vector in the positional encoding, where each vector represents the positional encoding for each step in the input sequence.
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/3_signal/images/positional_encodings.png" alt="positional_encodings" width="400px" height="whatever" style="display: block;">
+<img src="images/positional_encodings.png" alt="positional_encodings" width="400px" height="whatever" style="display: block;">
 </div>
 
 *L2-norm of positional encodings for each input step.*
@@ -114,7 +114,7 @@ Here the L2-Norm of the positional vector is far larger for the first step (0.81
 
 *This experiment started out as an attempt to see if we can explicitly change the attention weights assigned to different letters by changing the signal ie. if the signal is 'B', the attention assigned to 'B's should be higher. However, this only seems to occur infrequently. Perhaps via self-attention, the sequence encodes the relevant information into the first step (signal) so the decoder simply focuses on the first step. Or it could be just spread out across all the steps so the decoder does not explicitly focus on the relevant letters in the input sequence. Maybe more on this in the future.*
 
-### Adjusting `--enc_layers`
+### Adjusting `--num_enc_layers`
 
 Using the script, we can also adjust the number of encoder layers, where each layer comprises self-attention, followed by a regular feed-forward network (see Figure 1 and Section 3.1 in Vaswani et al. (2017)).
 
@@ -128,11 +128,11 @@ By inspecting the self-attention weights for the word `its`, Vaswani et al. (201
 
 In our case, the use of encoder layers allow the input sequence to modify itself based on its own signal. In particular, the decoder is restricted to a single scaled dot-product attention layer, which means that the encoder has to find a good representation for the sequence, so that the decoder can quickly retrieve the relevant information via a single attention layer.
 
-In general, we find that with increasing `--enc_layers`, the decoder's attention on the first step (signal) tends to decrease, in the Encoder-Decoder Attention layer.
+In general, we find that with increasing `--num_enc_layers`, the decoder's attention on the first step (signal) tends to decrease, in the Encoder-Decoder Attention layer.
 
-The previous sample output was trained with `--enc_layers=1`, where the attention weight on the signal was 32%.
+The previous sample output was trained with `--num_enc_layers=1`, where the attention weight on the signal was 32%.
 
-Sample output from testing the model trained with `--pos_enc` and `--enc_layers=6`:
+Sample output from testing the model trained with `--pos_enc` and `--num_enc_layers=6`:
 
 ```
 Input: 
@@ -159,7 +159,7 @@ L2-Norm of Input Positional Encoding:
 [0.884, 0.115, 0.119, 0.114, 0.116, 0.12, 0.116, 0.122, 0.118, 0.119, 0.12]
 ```
 
-In contrast to the previous output from `--enc_layers=1`, the attention weight on the signal here is far smaller at only 8%.
+In contrast to the previous output from `--num_enc_layers=1`, the attention weight on the signal here is far smaller at only 8%.
 
 Very hypothetically, it could be that the use of more encoder layers allows the encoding to spread out the information across all the steps, making the decoder less reliant on a single step.
 
@@ -178,7 +178,7 @@ This trains a model without positional encodings and with default parameters:
 - Learning rate: `--lr=1e-2`
 - Savepath: `--savepath=models/`
 - Encoding dimensions: `--hidden=64`
-- Encoder layers: `--enc_layers=1`
+- Encoder layers: `--num_enc_layers=1`
 
 The model will be trained on the Difference Task with default parameters:
 
@@ -197,13 +197,13 @@ This trains a model with positional encodings and with default parameters (see a
 
 The model will be trained on the Difference Task with default parameters (see above).
 
-Vary the number of encoder layers used with the `--enc_layers` flag:
+Vary the number of encoder layers used with the `--num_enc_layers` flag:
 
 ```
-$ python3 main.py --train --pos_enc --enc_layers 6
+$ python3 main.py --train --pos_enc --num_enc_layers 6
 ```
 
-The above command will train a model with positional encodings and 6 encoder layers. `--enc_layers=1` by default.
+The above command will train a model with positional encodings and 6 encoder layers. `--num_enc_layers=1` by default.
 
 ### Testing
 
@@ -213,7 +213,7 @@ or
 $ python3 main.py --test --pos_enc
 ```
 
-This tests the trained model (remember to specify the `--pos_enc` flag if positional encodings were used during training and to specify the number of encoder layers via `--enc_layers` if not default).
+This tests the trained model (remember to specify the `--pos_enc` flag if positional encodings were used during training and to specify the number of encoder layers via `--num_enc_layers` if not default).
 
 ### Help
 
@@ -251,12 +251,7 @@ We touched on this briefly at the end of Task 1 in the Notes section, where we d
 First, consider the embedding of the input:
 
 ```python3
-encoding = tf.layers.dense(
-	inputs=self.input,
-	units=self.hidden,
-	activation=None,
-	name="encoding"
-)
+self.base_enc_layer = nn.Linear(self.vocab_size, self.hidden)
 ```
 
 Since this is a simple position-wise feedforward network, an input vector of 'A' will always output the same encoding vector of `hidden` dimension, irregardless of the vector's position. (We use 'A' here as an example but the same logic applies to every other character.)
@@ -270,32 +265,27 @@ Nope. Just as in the Encoder-Decoder Attention layer, the same attention weights
 Instead, we simply add positional encoding.
 
 ```python3
-input_positional_encoding = tf.Variable(
-	initial_value=np.zeros((1, self.max_len + 1, self.hidden)),
-	trainable=True,
-	dtype=tf.float32,
-	name="input_positional_coding"
-)
+self.input_pos_enc = nn.Parameter(torch.zeros((1, self.max_len + 1, self.hidden)))
 
 if self.pos_enc:
-	# Add positional encodings
-	encoding += input_positional_encoding
+    # Add positional encodings
+    encoding += self.input_pos_enc
 ```
 
-Here, we allow the model to learn the positional encoding by initializing it as a trainable `tf.Variable`, just as with the **Queries** tensor from Task 1. Then, we just add it to the encodings.
+Here, we allow the model to learn the positional encoding by initializing it as a trainable `nn.Parameter`, just as with the **Queries** tensor from Task 1. Then, we just add it to the encodings.
 
 Notice that the shape of the positional encoding is `(1, max_len + 1, hidden)` ie. for each step in a length `max_len + 1` sequence, there is a vector of `hidden` dimension that represents information about the position. When we add this to the encoding, the addition is broadcasted to each sequence in the batch.
 
 With this, an 'A' in one input step is different from an 'A' in another input step, since the positional vector at each input step is different. Furthermore, in this task, we know that the first step is significantly different as the signal, whereas the positions of the other steps are not very important. In fact, it is best if the positional encoding only changes the first step and leaves the rest of the sequence untouched, since position does not matter for the rest of the sequence. We see this clearly in the L2-norms of the positional vectors in the sample outputs from earlier (reproduced below), which are larger for the first step and much smaller for the rest of the steps.
 
-From model trained with `--pos_enc` and `enc_layers=1`:
+From model trained with `--pos_enc` and `num_enc_layers=1`:
 
 ```
 L2-Norm of Input Positional Encoding:
 [0.816, 0.181, 0.183, 0.185, 0.186, 0.18, 0.185, 0.183, 0.185, 0.183, 0.178]
 ```
 
-From model trained with `--pos_enc` and `enc_layers=6`:
+From model trained with `--pos_enc` and `num_enc_layers=6`:
 
 ```
 L2-Norm of Input Positional Encoding:

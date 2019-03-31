@@ -3,23 +3,28 @@ Task 3 - Signal
 Demonstration of positional encodings
 """
 
-import tensorflow as tf
-import numpy as np
+import os
 import string
+import numpy as np
 from absl import flags
 from absl import app
 import seaborn
 import matplotlib.pyplot as plt
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
 FLAGS = flags.FLAGS
 
 # Commands
 flags.DEFINE_bool("train", False, "Train")
 flags.DEFINE_bool("test", False, "Test")
-flags.DEFINE_bool("plot", False, "Plot attention and positional encoding heatmaps during testing")
+flags.DEFINE_bool("plot", False, "Plot attention heatmap during testing")
 
 # Training parameters
-flags.DEFINE_integer("steps", 2000, "Number of training steps")
+flags.DEFINE_integer("steps", 1000, "Number of training steps")
 flags.DEFINE_integer("print_every", 50, "Interval between printing loss")
 flags.DEFINE_integer("save_every", 50, "Interval between saving model")
 flags.DEFINE_string("savepath", "models/", "Path to save or load model")
@@ -27,13 +32,12 @@ flags.DEFINE_integer("batchsize", 100, "Training batchsize per step")
 
 # Model parameters
 flags.DEFINE_bool("pos_enc", False, "Whether to use positional encodings")
-flags.DEFINE_integer("enc_layers", 1, "Number of self-attention layers for encodings")
+flags.DEFINE_integer("num_enc_layers", 1, "Number of self-attention layers for encodings")
 flags.DEFINE_integer("hidden", 64, "Hidden dimension in model")
 
 # Task parameters
 flags.DEFINE_integer("max_len", 10, "Maximum input length from toy task")
 flags.DEFINE_integer("vocab_size", 3, "Size of input vocabulary")
-flags.DEFINE_string("signal", None, "Control signal character for test sample")
 
 
 class Task(object):
@@ -62,208 +66,196 @@ class Task(object):
         dictionary = np.array(list(string.ascii_uppercase))
         return dictionary[idx]
 
-class AttentionModel(object):
 
-    def __init__(self, sess, max_len=10, vocab_size=3, hidden=64, name="Signal", pos_enc=True, enc_layers=1):
-        super(AttentionModel, self).__init__()
-        self.sess = sess
+class AttentionModel(nn.Module):
+    def __init__(self, max_len=10, vocab_size=3, hidden=64,
+                 pos_enc=True, num_enc_layers=1):
+        super().__init__()
+
         self.max_len = max_len
         self.vocab_size = vocab_size
         self.hidden = hidden
-        self.name = name
         self.pos_enc = pos_enc
-        self.enc_layers = enc_layers
-        with tf.variable_scope(self.name):
-            self.build_model()
-            variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.name)
-            self.saver = tf.train.Saver(var_list=variables, max_to_keep=1)
+        self.num_enc_layers = num_enc_layers
 
-    def build_model(self):
+        self.layer_norm = nn.LayerNorm(self.hidden)
+        self.input_pos_enc = nn.Parameter(torch.zeros((1, self.max_len + 1, self.hidden)))
 
-        self.input = tf.placeholder(
-            shape=(None, self.max_len + 1, self.vocab_size),
-            dtype=tf.float32,
-            name="input",
-        )
+        self.base_enc_layer = nn.Linear(self.vocab_size, self.hidden)
+        self.enc_layers = []
+        for i in range(self.num_enc_layers):
+            self.enc_layers.append([
+                nn.Linear(self.hidden, self.hidden * 2),
+                nn.Linear(self.hidden * 2, self.hidden)])
 
-        self.labels = tf.placeholder(
-            shape=(None, 1, self.max_len + 1),
-            dtype=tf.float32,
-            name="labels",
-        )
+        self.decoder_input = nn.Parameter(torch.zeros((1, 1, self.hidden)))
+        self.decoder_dense = nn.Linear(self.hidden, self.max_len + 1)
 
-        self.input_pos_enc = input_positional_encoding = tf.Variable(
-            initial_value=np.zeros((1, self.max_len + 1, self.hidden)),
-            trainable=True,
-            dtype=tf.float32,
-            name="input_positional_coding"
-        )
-
-        decoder_input = tf.Variable(
-            initial_value=np.zeros((1, 1, self.hidden)),
-            trainable=True,
-            dtype=tf.float32,
-            name="decoder_input",
-        )
-
-        # Input Embedding
-        encoding = tf.layers.dense(
-            inputs=self.input,
-            units=self.hidden,
-            activation=None,
-            name="encoding"
-        )
+    def forward(self, x):
+        encoding = self.base_enc_layer(x)
 
         if self.pos_enc:
             # Add positional encodings
-            encoding += input_positional_encoding
+            encoding += self.input_pos_enc
 
-        for i in np.arange(self.enc_layers):
-            encoding, _ = self.attention(
-                query=encoding,
-                key=encoding,
-                value=encoding,
-            )
-            dense = tf.layers.dense(
-                inputs=encoding,
-                units=self.hidden * 2,
-                activation=tf.nn.relu,
-                name="encoder_layer{}_dense1".format(i + 1)
-            )
-            encoding += tf.layers.dense(
-                inputs=dense,
-                units=self.hidden,
-                activation=None,
-                name="encoder_layer{}_dense2".format(i + 1)
-            )
-            encoding = tf.contrib.layers.layer_norm(encoding, begin_norm_axis=2)
+        for i in range(self.num_enc_layers):
+            encoding, _ = self.attention(encoding, encoding, encoding)
+            dense = F.relu(self.enc_layers[i][0](encoding))
+            encoding = encoding + self.enc_layers[i][1](dense)
+            encoding = self.layer_norm(encoding)
 
-        decoding, self.attention_weights = self.attention(
-            query=tf.tile(decoder_input, multiples=tf.concat(([tf.shape(self.input)[0]], [1], [1]), axis=0)),
-            key=encoding,
-            value=encoding,
-        )
+        decoding, attention_weights = self.attention(
+            self.decoder_input.repeat(x.shape[0], 1, 1),
+            encoding,
+            encoding)
+        decoding = self.decoder_dense(decoding)
 
-        decoding = tf.layers.dense(
-            inputs=decoding,
-            units=self.max_len + 1,
-            activation=None,
-            name="decoding",
-        )
-
-        self.logits = decoding
-        self.predictions = tf.argmax(self.logits, axis=2)
-        self.loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=self.labels, logits=self.logits))
-        self.optimize = tf.train.AdamOptimizer(1e-3).minimize(self.loss)
+        return decoding, attention_weights, self.input_pos_enc
 
     def attention(self, query, key, value):
         # Equation 1 in Vaswani et al. (2017)
-        # 	Scaled dot product between Query and Keys
-        output = tf.matmul(query, key, transpose_b=True) / (tf.cast(tf.shape(query)[2], tf.float32) ** 0.5)
-        # 	Softmax to get attention weights
-        attention_weights = tf.nn.softmax(output)
-        # 	Multiply weights by Values
-        weighted_sum = tf.matmul(attention_weights, value)
+        # Scaled dot product between Query and Keys
+        scaling_factor = torch.tensor(np.sqrt(query.shape[2]))
+        output = torch.bmm(
+            query, key.transpose(1, 2)
+        ) / scaling_factor
+
+        # Softmax to get attention weights
+        attention_weights = F.softmax(output, dim=2)
+
+        # Multiply weights by Values
+        weighted_sum = torch.bmm(attention_weights, value)
+
         # Following Figure 1 and Section 3.1 in Vaswani et al. (2017)
-        # 	Residual connection ie. add weighted sum to original query
+        # Residual connection ie. add weighted sum to original query
         output = weighted_sum + query
-        # 	Layer normalization
-        output = tf.contrib.layers.layer_norm(output, begin_norm_axis=2)
-        # output = tf.nn.l2_normalize(output, dim=1)
+
+        # Layer normalization
+        output = self.layer_norm(output)
+
         return output, attention_weights
 
-    def save(self, savepath, global_step=None, prefix="ckpt", verbose=False):
-        if savepath[-1] != '/':
-            savepath += '/'
-        self.saver.save(self.sess, savepath + prefix, global_step=global_step)
-        if verbose:
-            print("Model saved to {}.".format(savepath + prefix + '-' + str(global_step)))
 
-    def load(self, savepath, verbose=False):
-        if savepath[-1] != '/':
-            savepath += '/'
-        ckpt = tf.train.latest_checkpoint(savepath)
-        self.saver.restore(self.sess, ckpt)
-        if verbose:
-            print("Model loaded from {}.".format(ckpt))
+def train(max_len=10,
+          vocab_size=3,
+          hidden=64,
+          pos_enc=False,
+          num_enc_layers=1,
+          batchsize=100,
+          steps=2000,
+          print_every=50,
+          savepath='models/'):
+
+    os.makedirs(savepath, exist_ok=True)
+    model = AttentionModel(max_len=max_len, vocab_size=vocab_size,
+                           hidden=hidden, pos_enc=pos_enc,
+                           num_enc_layers=num_enc_layers)
+    optimizer = optim.Adam(model.parameters(), lr=1e-2)
+    task = Task(max_len=max_len, vocab_size=vocab_size)
+
+    for i in np.arange(steps):
+        minibatch_x, minibatch_y = task.next_batch(batchsize=batchsize)
+        optimizer.zero_grad()
+        with torch.set_grad_enabled(True):
+            minibatch_x = torch.Tensor(minibatch_x)
+            minibatch_y = torch.Tensor(minibatch_y)
+            out, _, _ = model(minibatch_x)
+            loss = F.cross_entropy(
+                out.transpose(1, 2),
+                minibatch_y.argmax(dim=2))
+            loss.backward()
+            optimizer.step()
+        if (i + 1) % print_every == 0:
+            print("Iteration {} - Loss {}".format(i + 1, loss))
+
+    print("Iteration {} - Loss {}".format(i + 1, loss))
+    print("Training complete!")
+    torch.save(model.state_dict(), savepath + '/ckpt.pt')
+
+
+def test(max_len=10,
+         vocab_size=3,
+         hidden=64,
+         pos_enc=False,
+         num_enc_layers=1,
+         savepath='models/',
+         plot=True):
+
+    model = AttentionModel(max_len=max_len, vocab_size=vocab_size,
+                           hidden=hidden, pos_enc=pos_enc,
+                           num_enc_layers=num_enc_layers)
+    model.load_state_dict(torch.load(savepath + '/ckpt.pt'))
+    task = Task(max_len=max_len, vocab_size=vocab_size)
+
+    samples, labels = task.next_batch(batchsize=1)
+    print("\nInput: \n{}".format(task.prettify(samples)))
+    model.eval()
+    with torch.set_grad_enabled(False):
+        predictions, attention, input_pos_enc = model(torch.Tensor(samples))
+    predictions = predictions.detach().numpy()
+    predictions = predictions.argmax(axis=2)
+    attention = attention.detach().numpy()
+
+    print("\nPrediction: \n{}".format(predictions))
+    print("\nEncoder-Decoder Attention: ")
+    for i, output_step in enumerate(attention[0]):
+        print("Output step {} attended mainly to Input steps: {}".format(
+            i, np.where(output_step >= np.max(output_step))[0]))
+        print([float("{:.3f}".format(step)) for step in output_step])
+
+    if plot:
+        fig, ax = plt.subplots()
+        seaborn.heatmap(
+            attention[0],
+            yticklabels=["output_0"],
+            xticklabels=task.prettify(samples).reshape(-1),
+            ax=ax,
+            cmap='plasma',
+            cbar=True,
+            cbar_kws={"orientation": "horizontal"})
+        ax.set_aspect('equal')
+        ax.set_title("Encoder-Decoder Attention")
+        for tick in ax.get_yticklabels():
+            tick.set_rotation(0)
+        plt.show()
+
+    if pos_enc:
+        input_pos_enc = input_pos_enc.detach().numpy()
+        print("\nL2-Norm of Input Positional Encoding:")
+        print([
+            float("{:.3f}".format(step))
+            for step in np.linalg.norm(input_pos_enc, ord=2, axis=2)[0]])
+
+        if plot:
+            fig2, ax2 = plt.subplots()
+            seaborn.heatmap(
+                [np.linalg.norm(input_pos_enc, ord=2, axis=2)[0]],
+                vmin=0.,
+                # vmax=.5,
+                yticklabels=["L2-Norm"],
+                xticklabels=task.prettify(samples).reshape(-1),
+                ax=ax2,
+                cmap='plasma',
+                cbar=True,
+                cbar_kws={"orientation": "horizontal"})
+        ax2.set_aspect('equal')
+        ax2.set_title("Positional Encodings L2-Norm")
+        for tick in ax2.get_yticklabels():
+            tick.set_rotation(0)
+        plt.show()
+
 
 def main(unused_args):
-
     if FLAGS.train:
-        tf.gfile.MakeDirs(FLAGS.savepath)
-        with tf.Session() as sess:
-            model = AttentionModel(sess=sess, max_len=FLAGS.max_len, vocab_size=FLAGS.vocab_size, hidden=FLAGS.hidden, pos_enc=FLAGS.pos_enc, enc_layers=FLAGS.enc_layers)
-            sess.run(tf.global_variables_initializer())
-            task = Task(max_len=FLAGS.max_len, vocab_size=FLAGS.vocab_size)
-            for i in np.arange(FLAGS.steps):
-                minibatch_x, minibatch_y = task.next_batch(batchsize=FLAGS.batchsize)
-                feed_dict = {
-                    model.input: minibatch_x,
-                    model.labels: minibatch_y,
-                }
-                _, loss = sess.run([model.optimize, model.loss], feed_dict)
-                if (i + 1) % FLAGS.save_every == 0:
-                    model.save(FLAGS.savepath, global_step=i + 1)
-                if (i + 1) % FLAGS.print_every == 0:
-                    print("Iteration {} - Loss {}".format(i + 1, loss))
-            print("Iteration {} - Loss {}".format(i + 1, loss))
-            print("Training complete!")
-            model.save(FLAGS.savepath, global_step=i + 1, verbose=True)
-
-    if FLAGS.test:
-        with tf.Session() as sess:
-            model = AttentionModel(sess=sess, max_len=FLAGS.max_len, vocab_size=FLAGS.vocab_size, hidden=FLAGS.hidden, pos_enc=FLAGS.pos_enc, enc_layers=FLAGS.enc_layers)
-            model.load(FLAGS.savepath)
-            task = Task(max_len=FLAGS.max_len, vocab_size=FLAGS.vocab_size)
-            samples, labels = task.next_batch(batchsize=1, signal=FLAGS.signal)
-            print("\nInput: \n{}".format(task.prettify(samples)))
-            feed_dict = {
-                model.input: samples,
-            }
-            if FLAGS.pos_enc:
-                predictions, attention, input_pos_enc = sess.run([model.predictions, model.attention_weights, model.input_pos_enc], feed_dict)
-            else:
-                predictions, attention = sess.run([model.predictions, model.attention_weights], feed_dict)
-            print("\nPrediction: \n{}".format(predictions))
-            print("\nEncoder-Decoder Attention: ")
-            for i, output_step in enumerate(attention[0]):
-                print("Output step {} attended mainly to Input steps: {}".format(i, np.where(output_step >= np.max(output_step))[0]))
-                print([float("{:.3f}".format(step)) for step in output_step])
-
-            if FLAGS.plot:
-                fig, ax = plt.subplots()
-                seaborn.heatmap(
-                    attention[0],
-                    yticklabels=["output_0"],
-                    xticklabels=task.prettify(samples).reshape(-1),
-                    cbar=False,
-                    ax=ax,
-                )
-                ax.set_aspect('equal')
-                ax.set_title("Encoder-Decoder Attention")
-                for tick in ax.get_yticklabels(): tick.set_rotation(0)
-
-            if FLAGS.pos_enc:
-                print("\nL2-Norm of Input Positional Encoding:")
-                print([float("{:.3f}".format(step)) for step in np.linalg.norm(input_pos_enc, ord=2, axis=2)[0]])
-
-                if FLAGS.plot:
-                    fig2, ax2 = plt.subplots()
-                    seaborn.heatmap(
-                        [np.linalg.norm(input_pos_enc, ord=2, axis=2)[0]],
-                        vmin=0.,
-                        # vmax=.5,
-                        yticklabels=["L2-Norm"],
-                        xticklabels=task.prettify(samples).reshape(-1),
-                        cbar=False,
-                        ax=ax2,
-                    )
-                    ax2.set_aspect('equal')
-                    ax2.set_title("Positional Encodings L2-Norm")
-                    for tick in ax2.get_yticklabels(): tick.set_rotation(0)
-
-            if FLAGS.plot:
-                plt.show()
+        train(FLAGS.max_len, FLAGS.vocab_size, FLAGS.hidden,
+              FLAGS.pos_enc, FLAGS.num_enc_layers, FLAGS.batchsize,
+              FLAGS.steps, FLAGS.print_every, FLAGS.savepath)
+    elif FLAGS.test:
+        test(FLAGS.max_len, FLAGS.vocab_size, FLAGS.hidden,
+             FLAGS.pos_enc, FLAGS.num_enc_layers, FLAGS.savepath,
+             FLAGS.plot)
+    else:
+        print('Specify train or test option')
 
 
 if __name__ == "__main__":
