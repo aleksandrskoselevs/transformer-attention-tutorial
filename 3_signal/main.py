@@ -24,7 +24,7 @@ flags.DEFINE_bool("test", False, "Test")
 flags.DEFINE_bool("plot", False, "Plot attention heatmap during testing")
 
 # Training parameters
-flags.DEFINE_integer("steps", 1000, "Number of training steps")
+flags.DEFINE_integer("steps", 2000, "Number of training steps")
 flags.DEFINE_integer("print_every", 50, "Interval between printing loss")
 flags.DEFINE_integer("save_every", 50, "Interval between saving model")
 flags.DEFINE_string("savepath", "models/", "Path to save or load model")
@@ -154,7 +154,7 @@ def train(max_len=10,
     model = AttentionModel(max_len=max_len, vocab_size=vocab_size,
                            hidden=hidden, pos_enc=pos_enc,
                            num_enc_layers=num_enc_layers)
-    optimizer = optim.Adam(model.parameters(), lr=1e-2)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
     lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=250, verbose=True)
     task = Task(max_len=max_len, vocab_size=vocab_size)
