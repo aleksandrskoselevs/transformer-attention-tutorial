@@ -80,9 +80,6 @@ class AttentionModel(nn.Module):
         self.use_multihead = use_multihead
         self.heads = heads
 
-        if use_multihead:
-            self.multihead_attention = MultiHeadAttention(self.heads, self.hidden)
-
         self.att_layer_norm = nn.LayerNorm(self.hidden)
         self.input_pos_enc = nn.Parameter(torch.zeros((1, self.max_len + 3, self.hidden)))
 
@@ -100,6 +97,13 @@ class AttentionModel(nn.Module):
         self.decoder_input = nn.Parameter(torch.zeros((1, 3, self.hidden)))
         self.decoder_dense = nn.Linear(self.hidden, self.max_len + 1)
 
+        if use_multihead:
+            self.enc_mult_att = nn.ModuleList([
+                MultiHeadAttention(self.heads, self.hidden)
+                for i in range(self.enc_layers)
+            ])
+            self.enc_dec_mult_att = MultiHeadAttention(self.heads, self.hidden)
+
     def forward(self, x):
         encoding = self.base_enc_layer(x)
 
@@ -109,7 +113,7 @@ class AttentionModel(nn.Module):
 
         for i in range(self.enc_layers):
             if self.use_multihead:
-                encoding, _ = self.multihead_attention(encoding, encoding, encoding)
+                encoding, _ = self.enc_mult_att[i](encoding, encoding, encoding)
             else:
                 encoding, _ = self.attention(encoding, encoding, encoding)
             dense = F.relu(self.enc_increase_hidden[i](encoding))
@@ -117,7 +121,7 @@ class AttentionModel(nn.Module):
             encoding = self.enc_layer_norm[i](encoding)
 
         if self.use_multihead:
-            decoding, attention_weights = self.multihead_attention(
+            decoding, attention_weights = self.enc_dec_mult_att(
                 self.decoder_input.repeat(x.shape[0], 1, 1),
                 encoding,
                 encoding)
