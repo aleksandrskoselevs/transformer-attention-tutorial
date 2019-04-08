@@ -2,11 +2,9 @@
 Task 5 - Translation
 Demonstration of full Transformer model
 """
+
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
-import tensorflow as tf
 import numpy as np
-import string
 import codecs
 import regex
 import json
@@ -16,21 +14,25 @@ import seaborn
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+
 FLAGS = flags.FLAGS
 
 # Commands
 flags.DEFINE_bool("train", False, "Train")
 flags.DEFINE_bool("test", False, "Test")
-flags.DEFINE_bool("load", False, "Resume training from saved model")
 flags.DEFINE_bool("plot", False, "Plot attention heatmaps")
+flags.DEFINE_bool("cuda", False, "Use cuda")
 
 # Training parameters
-flags.DEFINE_integer("steps", 50000, "Number of training steps")
+flags.DEFINE_integer("epochs", 1, "Number of training epochs")
 flags.DEFINE_integer("print_every", 50, "Interval between printing loss")
-flags.DEFINE_integer("save_every", 50, "Interval between saving model")
 flags.DEFINE_string("savepath", "models/", "Path to save or load model")
 flags.DEFINE_integer("batchsize", 64, "Training batchsize per step")
-flags.DEFINE_float("lr", 1e-4, "Learning rate")
 
 # Model parameters
 flags.DEFINE_integer("heads", 4, "Number of heads for multihead attention")
@@ -118,288 +120,309 @@ class Task(object):
         return " ".join(np.array(dictionary)[idxs])
 
 
-class AttentionModel(object):
+class AttentionModel(nn.Module):
 
-    def __init__(self, sess, en_vocab_size, de_vocab_size, max_len=20, hidden=64, name="Translate", enc_layers=6, dec_layers=6, heads=4, learning_rate=1e-4):
-        super(AttentionModel, self).__init__()
-        self.sess = sess
+    def __init__(self, en_vocab_size, de_vocab_size,
+                 max_len=20, hidden=64,
+                 enc_layers=6, dec_layers=6,
+                 heads=4):
+        super().__init__()
+
         self.max_len = max_len
         self.en_vocab_size = en_vocab_size
         self.de_vocab_size = de_vocab_size
         self.hidden = hidden
-        self.name = name
         self.enc_layers = enc_layers
         self.dec_layers = dec_layers
         self.heads = heads
-        self.learning_rate = learning_rate
-        with tf.variable_scope(self.name):
-            self.build_model()
-            variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.name)
-            self.saver = tf.train.Saver(var_list=variables, max_to_keep=1)
 
-    def build_model(self):
+        self.enc_input_dense = nn.Linear(self.de_vocab_size, self.hidden)
+        self.enc_pos_enc = nn.Parameter(torch.zeros((1, self.max_len, self.hidden)))
+        self.enc_increase_hidden = nn.ModuleList([
+            nn.Linear(self.hidden, self.hidden * 2)
+            for i in range(self.enc_layers)])
+        self.enc_decrease_hidden = nn.ModuleList([
+            nn.Linear(self.hidden * 2, self.hidden)
+            for i in range(self.enc_layers)])
+        self.enc_layer_norm = nn.ModuleList([
+            nn.LayerNorm(self.hidden)
+            for i in range(self.enc_layers)])
+        self.enc_att = nn.ModuleList([
+            MultiHeadAttention(self.heads, self.hidden)
+            for i in range(self.enc_layers)])
 
-        self.enc_input = tf.placeholder(
-            shape=(None, self.max_len, self.de_vocab_size),
-            dtype=tf.float32,
-            name="encoder_input",
-        )
+        self.dec_input_dense = nn.Linear(self.en_vocab_size, self.hidden)
+        self.dec_pos_enc = nn.Parameter(torch.zeros((1, self.max_len + 1, self.hidden)))
+        self.dec_increase_hidden = nn.ModuleList([
+            nn.Linear(self.hidden, self.hidden * 2)
+            for i in range(self.dec_layers)])
+        self.dec_decrease_hidden = nn.ModuleList([
+            nn.Linear(self.hidden * 2, self.hidden)
+            for i in range(self.dec_layers)])
+        self.dec_layer_norm = nn.ModuleList([
+            nn.LayerNorm(self.hidden)
+            for i in range(self.dec_layers)])
+        self.dec_att = nn.ModuleList([
+            MultiHeadAttention(self.heads, self.hidden)
+            for i in range(self.dec_layers)])
+        self.enc_dec_att = nn.ModuleList([
+            MultiHeadAttention(self.heads, self.hidden)
+            for i in range(self.dec_layers)])
+        self.decoder_final_dense = nn.Linear(self.hidden, self.en_vocab_size)
 
-        self.dec_input = tf.placeholder(
-            shape=(None, self.max_len + 1, self.en_vocab_size),
-            dtype=tf.float32,
-            name="decoder_input",
-        )
-
-        self.labels = tf.placeholder(
-            shape=(None, self.max_len + 1, self.en_vocab_size),
-            dtype=tf.float32,
-            name="labels",
-        )
-
-        enc_pos_enc = tf.Variable(
-            initial_value=tf.zeros((1, self.max_len, self.hidden)),
-            trainable=True,
-            dtype=tf.float32,
-            name="encoder_positional_coding"
-        )
-
-        dec_pos_enc = tf.Variable(
-            initial_value=tf.zeros((1, self.max_len + 1, self.hidden)),
-            trainable=True,
-            dtype=tf.float32,
-            name="decoder_positional_coding"
-        )
-
+    def forward(self, x1, x2):
         # Embed inputs to hidden dimension
-        enc_input_emb = tf.layers.dense(
-            inputs=self.enc_input,
-            units=self.hidden,
-            activation=None,
-            name="encoder_input_embedding",
-        )
-
-        dec_input_emb = tf.layers.dense(
-            inputs=self.dec_input,
-            units=self.hidden,
-            activation=None,
-            name="decoder_input_embedding",
-        )
+        enc_input_emb = self.enc_input_dense(x1)
+        dec_input_emb = self.dec_input_dense(x2)
 
         # Add positional encodings
-        encoding = enc_input_emb + enc_pos_enc
-        decoding = dec_input_emb + dec_pos_enc
+        encoding = enc_input_emb + self.enc_pos_enc
+        decoding = dec_input_emb + self.dec_pos_enc
 
-        for i in np.arange(self.enc_layers):
+        for i in range(self.enc_layers):
             # Encoder Self-Attention
-            encoding, _ = self.multihead_attention(
-                query=encoding,
-                key=encoding,
-                value=encoding,
-                h=self.heads,
-            )
-            # Encoder Dense
-            dense = tf.layers.dense(
-                inputs=encoding,
-                units=self.hidden * 2,
-                activation=tf.nn.relu,
-                name="encoder_layer{}_dense1".format(i + 1)
-            )
-            encoding += tf.layers.dense(
-                inputs=dense,
-                units=self.hidden,
-                activation=None,
-                name="encoder_layer{}_dense2".format(i + 1)
-            )
-            encoding = tf.contrib.layers.layer_norm(encoding, begin_norm_axis=2)
+            encoding, _ = self.enc_att[i](
+                encoding, encoding, encoding)
+            # Encoder dense
+            dense = F.relu(self.enc_increase_hidden[i](encoding))
+            encoding = encoding + self.enc_decrease_hidden[i](dense)
+            encoding = self.enc_layer_norm[i](encoding)
 
-        for i in np.arange(self.dec_layers):
+        for i in range(self.dec_layers):
             # Decoder Self-Attention
-            decoding, _ = self.multihead_attention(
-                query=decoding,
-                key=decoding,
-                value=decoding,
-                h=self.heads,
-                mask=True,
-            )
+            decoding, _ = self.dec_att[i](
+                decoding, decoding, decoding, mask=True)
             # Encoder-Decoder Attention
-            decoding, self.attention = self.multihead_attention(
-                query=decoding,
-                key=encoding,
-                value=encoding,
-                h=self.heads
-            )
-            # Decoder Dense
-            dense = tf.layers.dense(
-                inputs=decoding,
-                units=self.hidden * 2,
-                activation=tf.nn.relu,
-                name="decoder_layer{}_dense1".format(i + 1)
-            )
-            decoding += tf.layers.dense(
-                inputs=dense,
-                units=self.hidden,
-                activation=None,
-                name="decoder_layer{}_dense2".format(i + 1)
-            )
-            decoding = tf.contrib.layers.layer_norm(decoding, begin_norm_axis=2)
+            decoding, attention = self.enc_dec_att[i](
+                decoding, encoding, encoding)
+            # Decoder dense
+            dense = F.relu(self.dec_increase_hidden[i](decoding))
+            decoding = decoding + self.dec_decrease_hidden[i](dense)
+            decoding = self.dec_layer_norm[i](decoding)
 
-        decoding = tf.layers.dense(
-            inputs=decoding,
-            units=self.en_vocab_size,
-            activation=None,
-            name="decoding",
-        )
+        decoding = self.decoder_final_dense(decoding)
 
-        self.logits = decoding
-        self.predictions = tf.argmax(self.logits, axis=2)
-        self.loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=self.labels, logits=self.logits))
-        self.optimize = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
+        return decoding, attention
 
-    def multihead_attention(self, query, key, value, h=4, mask=False):
-        W_query = tf.Variable(
-            initial_value=tf.random_normal((self.hidden, self.hidden), stddev=1e-2),
-            trainable=True,
-            dtype=tf.float32,
-        )
-        W_key = tf.Variable(
-            initial_value=tf.random_normal((self.hidden, self.hidden), stddev=1e-2),
-            trainable=True,
-            dtype=tf.float32,
-        )
-        W_value = tf.Variable(
-            initial_value=tf.random_normal((self.hidden, self.hidden), stddev=1e-2),
-            trainable=True,
-            dtype=tf.float32,
-        )
-        W_output = tf.Variable(
-            initial_value=tf.random_normal((self.hidden, self.hidden), stddev=1e-2),
-            trainable=True,
-            dtype=tf.float32,
-        )
-        multi_query = tf.concat(tf.unstack(tf.reshape(tf.matmul(tf.reshape(query, [-1, self.hidden]), W_query), [-1, 1, tf.shape(query)[1], h, int(self.hidden/h)]), axis=3), axis= 1)
-        multi_key = tf.concat(tf.unstack(tf.reshape(tf.matmul(tf.reshape(key, [-1, self.hidden]), W_key), [-1, 1, tf.shape(key)[1], h, int(self.hidden/h)]), axis=3), axis= 1)
-        multi_value = tf.concat(tf.unstack(tf.reshape(tf.matmul(tf.reshape(value, [-1, self.hidden]), W_value), [-1, 1, tf.shape(value)[1], h, int(self.hidden/h)]), axis=3), axis= 1)
-        dotp = tf.matmul(multi_query, multi_key, transpose_b=True) / (tf.cast(tf.shape(multi_query)[-1], tf.float32) ** 0.5)
-        attention_weights = tf.nn.softmax(dotp)
+
+class MultiHeadAttention(nn.Module):
+    ''' Multi-Head Attention module '''
+
+    def __init__(self, h, hidden):
+        super().__init__()
+
+        self.h = h
+        self.hidden = hidden
+
+        self.W_query = nn.Parameter(torch.normal(
+            mean=torch.zeros((self.hidden, self.hidden)),
+            std=1e-2))
+        self.W_key = nn.Parameter(torch.normal(
+            mean=torch.zeros((self.hidden, self.hidden)),
+            std=1e-2))
+        self.W_value = nn.Parameter(torch.normal(
+            mean=torch.zeros((self.hidden, self.hidden)),
+            std=1e-2))
+        self.W_output = nn.Parameter(torch.normal(
+            mean=torch.zeros((self.hidden, self.hidden)),
+            std=1e-2))
+
+        self.layer_norm = nn.LayerNorm(self.hidden)
+
+    def forward(self, query, key, value, mask=False):
+        chunk_size = int(self.hidden/self.h)
+
+        multi_query = torch.matmul(query, self.W_query)\
+            .split(split_size=chunk_size, dim=-1)
+        multi_query = torch.stack(multi_query, dim=0)
+
+        multi_key = torch.matmul(key, self.W_key)\
+            .split(split_size=chunk_size, dim=-1)
+        multi_key = torch.stack(multi_key, dim=0)
+
+        multi_value = torch.matmul(value, self.W_value)\
+            .split(split_size=chunk_size, dim=-1)
+        multi_value = torch.stack(multi_value, dim=0)
+
+        scaling_factor = torch.tensor(np.sqrt(multi_query.shape[-1]))
+        dotp = torch.matmul(multi_query, multi_key.transpose(2, 3)) / scaling_factor
+        attention_weights = F.softmax(dotp, dim=-1)
 
         if mask:
-            attention_weights = tf.matrix_band_part(attention_weights, -1, 0)
-            attention_weights /= tf.reduce_sum(attention_weights, axis=3, keep_dims=True)
+            attention_weights = attention_weights.tril()
+            attention_weights = attention_weights / attention_weights.sum(dim=3, keepdim=True)
 
-        weighted_sum = tf.matmul(attention_weights, multi_value)
-        weighted_sum = tf.concat(tf.unstack(weighted_sum, axis=1), axis=-1)
+        weighted_sum = torch.matmul(attention_weights, multi_value)
+        weighted_sum = weighted_sum.split(1, dim=0)
+        weighted_sum = torch.cat(weighted_sum, dim=-1).squeeze()
 
-        multihead = tf.reshape(tf.matmul(tf.reshape(weighted_sum, [-1, self.hidden]), W_output), [-1, tf.shape(query)[1], self.hidden])
-        output = multihead + query
-        output = tf.contrib.layers.layer_norm(output, begin_norm_axis=2)
+        output = weighted_sum + query
+        output = self.layer_norm(output)
         return output, attention_weights
 
 
-    def save(self, savepath, global_step=None, prefix="ckpt", verbose=False):
-        if savepath[-1] != '/':
-            savepath += '/'
-        self.saver.save(self.sess, savepath + prefix, global_step=global_step)
-        if verbose:
-            print("Model saved to {}.".format(savepath + prefix + '-' + str(global_step)))
+class TaskDataset(Dataset):
+    def __init__(self, task, max_len):
+        super().__init__()
+        self.task = task
+        self.max_len = max_len
 
-    def load(self, savepath, verbose=False):
-        if savepath[-1] != '/':
-            savepath += '/'
-        ckpt = tf.train.latest_checkpoint(savepath)
-        self.saver.restore(self.sess, ckpt)
-        if verbose:
-            print("Model loaded from {}.".format(ckpt))
-        return ckpt
+    def __len__(self):
+        return self.task.n_samples
+
+    def __getitem__(self, i):
+        ans = [x[0] for x in self.task.next_batch(
+            batchsize=1,
+            max_len=self.max_len,
+            idx=i)]
+        return ans
+
+
+def train(max_len=20,
+          hidden=64,
+          enc_layers=1,
+          dec_layers=6,
+          heads=4,
+          batchsize=64,
+          epochs=1,
+          print_every=50,
+          savepath='models/',
+          cuda=torch.cuda.is_available()):
+
+    os.makedirs(savepath, exist_ok=True)
+    task = Task()
+    device = torch.device('cuda:0' if cuda else 'cpu')
+    print('Device: ', device)
+    model = AttentionModel(task.en_vocab_size,
+                           task.de_vocab_size,
+                           max_len,
+                           hidden,
+                           enc_layers,
+                           dec_layers,
+                           heads).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
+    task_dataset = TaskDataset(task, int(max_len))
+    task_dataloader = DataLoader(task_dataset,
+                                 batch_size=batchsize,
+                                 shuffle=True,
+                                 drop_last=True,
+                                 num_workers=7)
+
+    for i in range(epochs):
+        print('Epoch: ', i)
+        this_epoch_loss = 0
+        for j, a_batch in enumerate(task_dataloader):
+            minibatch_enc_in, minibatch_dec_in, minibatch_dec_out = a_batch
+            optimizer.zero_grad()
+            with torch.set_grad_enabled(True):
+                minibatch_enc_in = minibatch_enc_in.float().to(device)
+                minibatch_dec_in = minibatch_dec_in.float().to(device)
+                minibatch_dec_out = minibatch_dec_out.to(device)
+                out, _ = model(minibatch_enc_in, minibatch_dec_in)
+                loss = F.cross_entropy(
+                    out.transpose(1, 2),
+                    minibatch_dec_out.argmax(dim=2))
+                loss.backward()
+                optimizer.step()
+            loss = loss.detach().cpu().numpy()
+            this_epoch_loss += loss
+            if (j + 1) % print_every == 0:
+                print("Iteration {} - Loss {}".format(j + 1, loss))
+
+        this_epoch_loss /= (j + 1)
+        print("Epoch {} - Loss {}".format(i, this_epoch_loss))
+
+        lr_scheduler.step(this_epoch_loss)
+
+        torch.save(model.state_dict(), savepath + '/ckpt_{}.pt'.format(str(i)))
+        print('Model saved')
+
+    print("Training complete!")
+    torch.save(model.state_dict(), savepath + '/ckpt.pt')
+
+
+def test(max_len=20,
+         hidden=64,
+         enc_layers=1,
+         dec_layers=6,
+         heads=4,
+         savepath='models/',
+         plot=True,
+         line=198405,
+         cuda=torch.cuda.is_available()):
+
+    task = Task()
+    device = torch.device('cuda:0' if cuda else 'cpu')
+    print('Device: ', device)
+    model = AttentionModel(task.en_vocab_size,
+                           task.de_vocab_size,
+                           max_len,
+                           hidden,
+                           enc_layers,
+                           dec_layers,
+                           heads).to(device)
+    model.load_state_dict(torch.load(savepath + '/ckpt.pt'))
+
+    idx = line
+    if idx is None:
+        idx = np.random.randint(low=0, high=task.n_samples)
+        print('Predicting line :', idx)
+
+    samples, _, truth = task.next_batch(batchsize=1, max_len=max_len, idx=idx)
+    print("\nInput : \n{}".format(regex.sub("\s<PAD>", "", task.prettify(samples[0], task.de_dict))))
+    print("\nTruth : \n{}".format(regex.sub("\s<PAD>", "", task.prettify(truth[0], task.en_dict))))
+
+    output = ""
+    for i in range(max_len):
+        predictions, attention = model(
+            torch.Tensor(samples).to(device),
+            torch.Tensor(task.embed(output, task.en_dict, sos=True)).to(device))
+        predictions = predictions.detach().cpu().numpy()
+        attention = attention.detach().cpu().numpy()
+        output += " " + task.prettify(predictions[0], task.en_dict).split()[i]
+    print("\nOutput: \n{}".format(regex.sub("\s<PAD>", "", task.prettify(predictions[0], task.en_dict))))
+
+    if plot:
+        fig = plt.figure(figsize=(10, 10))
+        gs = gridspec.GridSpec(2, 2, hspace=0.5, wspace=0.5)
+        x_labels = regex.sub("\s<PAD>", "", task.prettify(samples[0], task.de_dict)).split()
+        y_labels = regex.sub("\s<PAD>", "", task.prettify(predictions[0], task.en_dict)).split()
+        for i in range(4):
+            ax = plt.Subplot(fig, gs[i])
+            seaborn.heatmap(
+                data=attention[:, 0, :, :][i, :len(y_labels), :len(x_labels)],
+                xticklabels=x_labels,
+                yticklabels=y_labels,
+                ax=ax,
+                cmap='plasma',
+                vmin=np.min(attention),
+                vmax=np.max(attention),
+                cbar=False)
+            ax.set_title("Head {}".format(i))
+            ax.set_aspect('equal')
+            for tick in ax.get_xticklabels():
+                tick.set_rotation(90)
+            for tick in ax.get_yticklabels():
+                tick.set_rotation(0)
+            fig.add_subplot(ax)
+        plt.show()
+
 
 def main(unused_args):
-
     if FLAGS.train:
-        tf.gfile.MakeDirs(FLAGS.savepath)
-        with tf.Session() as sess:
-            task = Task()
-            model = AttentionModel(
-                sess=sess,
-                en_vocab_size=task.en_vocab_size,
-                de_vocab_size=task.de_vocab_size,
-                max_len=FLAGS.max_len,
-                hidden=FLAGS.hidden,
-                enc_layers=FLAGS.enc_layers,
-                dec_layers=FLAGS.dec_layers,
-                heads=FLAGS.heads,
-                learning_rate=FLAGS.lr,
-            )
-            if FLAGS.load:
-                ckpt = model.load(FLAGS.savepath)
-                step = int(ckpt.split("ckpt-")[-1]) + 1
-            else:
-                sess.run(tf.global_variables_initializer())
-                step = 1
-            for i in np.arange(FLAGS.steps):
-                minibatch_enc_in, minibatch_dec_in, minibatch_dec_out = task.next_batch(batchsize=FLAGS.batchsize, max_len=FLAGS.max_len)
-                feed_dict = {
-                    model.enc_input: minibatch_enc_in,
-                    model.dec_input: minibatch_dec_in,
-                    model.labels: minibatch_dec_out,
-                }
-                _, loss = sess.run([model.optimize, model.loss], feed_dict)
-                if (i + step) % FLAGS.save_every == 0:
-                    model.save(FLAGS.savepath, global_step=i + step)
-                if (i + step) % FLAGS.print_every == 0:
-                    print("Iteration {} - Loss {}".format(i + step, loss))
-            print("Iteration {} - Loss {}".format(i + step, loss))
-            print("Training complete!")
-            model.save(FLAGS.savepath, global_step=i + step, verbose=True)
-
-    if FLAGS.test:
-        with tf.Session() as sess:
-            task = Task()
-            model = AttentionModel(
-                sess=sess,
-                en_vocab_size=task.en_vocab_size,
-                de_vocab_size=task.de_vocab_size,
-                max_len=FLAGS.max_len,
-                hidden=FLAGS.hidden,
-                enc_layers=FLAGS.enc_layers,
-                dec_layers=FLAGS.dec_layers,
-                heads=FLAGS.heads,
-                learning_rate=FLAGS.lr,
-            )
-            model.load(FLAGS.savepath)
-            samples, _, truth = task.next_batch(batchsize=1, max_len=FLAGS.max_len, idx=FLAGS.line)
-            print("\nInput : \n{}".format(regex.sub("\s<PAD>", "", task.prettify(samples[0], task.de_dict))))
-            print("\nTruth : \n{}".format(regex.sub("\s<PAD>", "", task.prettify(truth[0], task.en_dict))))
-
-            output = ""
-            for i in np.arange(FLAGS.max_len):
-                feed_dict = {
-                    model.enc_input: samples,
-                    model.dec_input: [task.embed(output, task.en_dict, sos=True)],
-                }
-                predictions, attention = sess.run([model.logits, model.attention], feed_dict)
-                output += " " + task.prettify(predictions[0], task.en_dict).split()[i]
-            print("\nOutput: \n{}".format(regex.sub("\s<PAD>", "", task.prettify(predictions[0], task.en_dict))))
-
-            if FLAGS.plot:
-                fig = plt.figure(figsize=(10, 10))
-                gs = gridspec.GridSpec(2, 2, hspace=0.5, wspace=0.5)
-                x_labels = regex.sub("\s<PAD>", "", task.prettify(samples[0], task.de_dict)).split()
-                y_labels = regex.sub("\s<PAD>", "", task.prettify(predictions[0], task.en_dict)).split()
-                for i in np.arange(4):
-                    ax = plt.Subplot(fig, gs[i])
-                    seaborn.heatmap(
-                        data=attention[0][i, :len(y_labels), :len(x_labels)],
-                        xticklabels=x_labels,
-                        yticklabels=y_labels,
-                        cbar=False,
-                        ax=ax,
-                    )
-                    ax.set_title("Head {}".format(i))
-                    ax.set_aspect('equal')
-                    for tick in ax.get_xticklabels(): tick.set_rotation(90)
-                    for tick in ax.get_yticklabels(): tick.set_rotation(0)
-                    fig.add_subplot(ax)
-                plt.show()
+        train(FLAGS.max_len, FLAGS.hidden,
+              FLAGS.enc_layers, FLAGS.dec_layers,
+              FLAGS.heads, FLAGS.batchsize,
+              FLAGS.epochs, FLAGS.print_every,
+              FLAGS.savepath, FLAGS.cuda)
+    elif FLAGS.test:
+        test(FLAGS.max_len, FLAGS.hidden,
+             FLAGS.enc_layers, FLAGS.dec_layers,
+             FLAGS.heads, FLAGS.savepath,
+             FLAGS.plot, FLAGS.line, FLAGS.cuda)
+    else:
+        print('Specify train or test option')
 
 
 if __name__ == "__main__":
