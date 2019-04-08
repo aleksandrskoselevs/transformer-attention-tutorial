@@ -307,7 +307,7 @@ by the way that's <UNK> stuff
 ```
 
 <div>
-<img src="https://raw.githubusercontent.com/greentfrapp/attention-primer/master/5_translation/images/line_153.png" alt="task_1" width="800px" height="whatever" style="display: block;">
+<img src="5_translation/images/line_153.png" alt="task_1" width="800px" height="whatever" style="display: block;">
 </div>
 
 Here the tokens `by the way` all attend strongly to `übrigens`, which is the German parallel for the English phrase. In addition, we also see that the English translation `<UNK> stuff` correctly flips the order of the German tokens `zeug <UNK>` (where `zeug` means `stuff`).
