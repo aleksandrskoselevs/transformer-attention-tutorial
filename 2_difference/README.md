@@ -133,6 +133,31 @@ In the Self-Attention weights, notice that Output Steps 0, 1 and 2 are generally
 
 However, Output Step 3 pays far less attention to itself (37%) and instead pays a lot of attention to Output Step 1 (63%). 
 
+-> 
+
+Question: Shouldn't it pay all of its attention to output_0 and ouput_1. Not just ouput_1. And not at all to itself?
+
+In the first, encoder step, output_3 is "counting" all A and
+B's. In the self-attention step, it's payit attentiont to 
+that count, i.e. itself, and the count of all the B's. In 
+other words, (A+B) - B
+
+ChatGPT:
+
+However, you're right in your observation that ideally, output step 3 should pay equal attention to output steps 0 and 1, since it's computing the difference between these two counts. The fact that it's paying most attention to output step 1 and itself could be due to the specifics of the training data and the model parameters. It's also possible that the model has learned to compute the difference in a roundabout way, by first focusing on one count, then adjusting based on its own value.
+
+However, it's also paying attention to itself (37%), which might seem counterintuitive. This could be due to a few reasons:
+
+1. Model Training Dynamics: The model might have learned that incorporating its own state (self-attention) helps in refining its output based on the overall context it has learned.
+
+2. Implicit Relationships: The model could be capturing more complex relationships where its current state provides useful information for the calculation, possibly due to how features have been encoded through the network.
+
+3. Attention Spread: In some models, attention doesn't always focus exclusively on the most obvious targets (like Output Steps 0 and 1 in this case). Instead, it might distribute attention across multiple steps, including itself, to gather a broader range of information.
+
+Ideally, for a task like this, we might expect the model to focus exclusively on Output Steps 0 and 1 for Output Step 3, and the fact that it doesn't might indicate room for further optimization or a nuanced behavior of the model that reflects its learned representation of the task.
+
+-> 
+
 <div>
 <img src="images/self_attention_self.png" alt="encoder attention heatmap no self" width="200px" height="whatever" style="display: block;">
 </div>
@@ -140,6 +165,14 @@ However, Output Step 3 pays far less attention to itself (37%) and instead pays 
 *Self-attention heatmap of output steps.*
 
 By allowing the output sequence to self-attend, we enable the modelling of inter-token dependencies. 
+
+->
+
+inter - meaning, between tokens themselves. In the first part,
+we were only looking at the input sequence. So each 'row' of 
+the matrix was only looking at the input data. Now, we have
+an extra step where we allow them to look at each others
+encodings.
 
 ## Commands
 

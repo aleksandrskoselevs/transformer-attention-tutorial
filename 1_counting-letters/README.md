@@ -144,11 +144,37 @@ The essence of attention lies in the idea of **Queries**, **Keys** and **Values*
 
 Suppose we have a supermarket catalogue of product names and respective prices and I want to calculate the average price of drinks. The **Query** is 'drinks', the **Keys** are all the product names and the **Values** are the respective prices. We focus our attention on **Values** (prices) of **Keys** (product names) that align most with our **Query** ('drinks').
 
+->
+
+The trainnig data will be:
+
+```python
+[
+  input: [[Pepsi, 0.69$], [Twixies, 0.34$], [Coke, 0.32$]], # product names, prices
+  label: [1.01$] # average price of drinkgs
+], 
+[
+  input: [[Snickers, 0.03$], [San Periggglo, 0.21$], [Herring, 0.60$]], # product names, prices
+  label: [0.21$] # average price of drinkgs
+], 
+```
+
+The AI will, based on the training data learn to represent in the latent space 
+which products are drinks. It won't be explicitly drinks, but the things it will
+be looking for in the latent space align most closely to what we call drinks
+in the real world.
+
+---
+
+
 See how the **Query** and **Keys** have to be the same type? You can see if two words align ('drinks' vs 'water') but you can't align a word with a number, or temperature with prices. Likewise, in the attention mechanism, the **Query** and **Keys** have to have the same dimensions.
 
 In scaled dot-product attention, we calculate alignment using the dot product. Intuitively, we see that if the **Query** and the **Key** are in the same direction, their dot product will be large and positive. If the **Query** and the **Key** are orthogonal, the dot product will be zero. Finally, if the **Query** and the **Key** are in opposite directions, their dot product will be large and negative.
 
 We then allocate more attention on **Values** whose **Keys** align to the **Query**. To do this, we simply multiply the softmax of the dot product by the **Values**. This gives us a weighted sum of the **Values**, where aligned **Keys** contribute more to this weighted sum.
+
+//
+Through training we _learn_ to give more attention to the keys that _give_ the correct weighted values
 
 Extract of the `attention` method from the `AttentionModel` class in the script:
 

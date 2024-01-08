@@ -170,6 +170,8 @@ class AttentionModel(nn.Module):
             for i in range(self.dec_layers)])
         self.decoder_final_dense = nn.Linear(self.hidden, self.en_vocab_size)
 
+    # Predict the next toke, given the source sentence and what we have
+    # predicted so far.
     def forward(self, x1, x2):
         # Embed inputs to hidden dimension
         enc_input_emb = self.enc_input_dense(x1)
@@ -197,10 +199,11 @@ class AttentionModel(nn.Module):
                 decoding, encoding, encoding)
             # Decoder dense
             dense = F.relu(self.dec_increase_hidden[i](decoding))
-            decoding = decoding + self.dec_decrease_hidden[i](dense)
-            decoding = self.dec_layer_norm[i](decoding)
+            feed_forward = self.dec_decrease_hidden[i](dense)
+            add = decoding + feed_forward
+            norm = self.dec_layer_norm[i](add)
 
-        decoding = self.decoder_final_dense(decoding)
+        decoding = self.decoder_final_dense(norm)
 
         return decoding, attention
 
@@ -248,6 +251,12 @@ class MultiHeadAttention(nn.Module):
         dotp = torch.matmul(multi_query, multi_key.transpose(2, 3)) / scaling_factor
         attention_weights = F.softmax(dotp, dim=-1)
 
+        # Even though these future positions don't have meaningful values yet, they still exist in the Q, K, and V matrices because these matrices are created for the maximum sequence length. Therefore, we need to mask these future positions to prevent the model from attending to them.
+        # The mask ensures that the attention mechanism only considers the appropriate positions at each step of the decoding process, maintaining the autoregressive property of the model.
+        # This type of masking is often referred to as "causal masking" or "autoregressive masking", and is a common technique used in transformer models.
+        
+        # Don't pay self-attention to the future latent space of
+        # the decoding
         if mask:
             attention_weights = attention_weights.tril()
             attention_weights = attention_weights / attention_weights.sum(dim=3, keepdim=True)
@@ -362,8 +371,8 @@ def test(max_len=20,
                            enc_layers,
                            dec_layers,
                            heads).to(device)
-    model.load_state_dict(torch.load(savepath + '/ckpt.pt'))
-
+    model.load_state_dict(torch.load(savepath + '/ckpt.pt', 
+                                     map_location=torch.device(device)))
     idx = line
     if idx is None:
         idx = np.random.randint(low=0, high=task.n_samples)
@@ -375,6 +384,11 @@ def test(max_len=20,
 
     output = ""
     for i in range(max_len):
+        # During inference, you're correct that we don't know the entire target sequence ahead of time. Instead, we typically start with a special start-of-sequence token (often denoted as <SOS> or <START>) as the first input to the decoder.
+        # Then, we run the decoder one step at a time. At each step, we take the output of the decoder from the previous step and use it as the input for the next step. This process is often referred to as "autoregressive decoding" because the model generates the output sequence one token at a time, using its own previous outputs as input for the next step.
+        # So, for minibatch_dec_in during inference, you would start with the start-of-sequence token, and then iteratively fill in the rest of the sequence with the model's own output from the previous step.        
+        
+        # `output` - we keep feeding it back, repetatively
         predictions, attention = model(
             torch.Tensor(samples).to(device),
             torch.Tensor(task.embed(output, task.en_dict, sos=True)).to(device))

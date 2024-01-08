@@ -216,7 +216,22 @@ The output tensor is of shape `(batchsize, 3, max_len + 1)`.
 
 In regular attention, we simply compare alignment of the **Queries** with the **Keys** to get a softmax-ed set of weights, which we use to calculate a weighted sum of the **Values**.
 
+
+_The Value in the supermarket is still the per item price. But it's the learned per item price, learned based on the training data. Have a look at the training data in ex 1._
+
 In multihead-attention, we first multiply the **Queries**, **Keys** and **Values** by respective weight tensors. Suppose the original tensors are all of shape `batchsize, length, hidden` and all consist of vectors of `hidden=64` dimensions and we want to implement multihead-attention with 4 heads. We then construct `4*3=12` weight tensors ie. 4 each for **Queries**, **Keys** and **Values**. Each weight tensor will be of shape `(hidden, hidden / 4)`, which means the outputs will consist of `64/4=16`-dimensional vectors. 
+
+---
+
+In the implementation our W's are 64. But we later split them.
+I guess this is the same as thinking of them being 4x16 from the beginning?
+
+ChatGPT:
+Implementation Approach: In your implementation, however, a single weight matrix of size (hidden, hidden) is used for each of Q, K, and V, and the result is then split into 4 parts, effectively creating the 'heads'. This is a different way to achieve the same end goal - it starts with a larger transformation and then splits it to simulate the effect of having multiple heads.
+
+Both approaches are valid, but they reflect different ways of structuring the model. The end result is similar - you get 4 sets of 16-dimensional vectors representing the transformed queries, keys, and values for each head. The implementation approach is more compact and often preferred in practice.
+
+---
 
 After multiplying the **Queries**, **Keys** and **Values** by their respective weight tensors (4 each), we will have 4 sets of **Queries**, **Keys** and **Values** tensors. The new tensors each consist of 16-dimensional vectors, as compared to the 64-dimensional vectors in the original tensors. 
 

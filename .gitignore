@@ -1,7 +1,3 @@
-1_counting-letters/models/
-2_difference/models/
-3_signal/models/
-4_signal2/models/
 *.DS_Store
 
 # Byte-compiled / optimized / DLL files

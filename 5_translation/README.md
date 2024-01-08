@@ -145,6 +145,14 @@ Output:
 by the way that's <UNK> stuff
 ```
 
+->
+
+In many natural language processing tasks, a fixed-size vocabulary is used to keep the computational complexity manageable. This vocabulary includes the most frequent words in the training data, but it can't include all possible words due to memory and computational constraints.
+
+When a word that's not in the vocabulary is encountered in the training data, it's replaced with the <UNK> token. This allows the model to learn how to handle unknown words when it encounters them in the test data.
+
+---
+
 <div>
 <img src="images/line_153.png" alt="task_1" width="800px" height="whatever" style="display: block;">
 </div>

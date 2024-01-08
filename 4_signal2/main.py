@@ -48,6 +48,7 @@ class Task(object):
         assert self.vocab_size <= 26, "vocab_size needs to be <= 26 since we are using letters to prettify LOL"
 
     def next_batch(self, batchsize=100, signal=None):
+        # np.random.seed(69)
         if signal is not None:
             signal = string.ascii_uppercase.index(signal)
             signal = np.eye(self.vocab_size)[np.ones((batchsize, 1), dtype=int) * signal]
@@ -61,7 +62,6 @@ class Task(object):
     def prettify(self, samples):
         samples = samples.reshape(-1, self.max_len + 3, self.vocab_size)
         idx = np.expand_dims(np.argmax(samples, axis=2), axis=2)
-        # This means max vocab_size is 26
         dictionary = np.array(list(string.ascii_uppercase))
         return dictionary[idx]
 
@@ -84,6 +84,9 @@ class AttentionModel(nn.Module):
         self.input_pos_enc = nn.Parameter(torch.zeros((1, self.max_len + 3, self.hidden)))
 
         self.base_enc_layer = nn.Linear(self.vocab_size, self.hidden)
+        self.enc_layer_att_norm = nn.ModuleList([
+            nn.LayerNorm(self.hidden)
+            for i in range(self.enc_layers)])
         self.enc_increase_hidden = nn.ModuleList([
             nn.Linear(self.hidden, self.hidden * 2)
             for i in range(self.enc_layers)])
@@ -95,42 +98,63 @@ class AttentionModel(nn.Module):
             for i in range(self.enc_layers)])
 
         self.decoder_input = nn.Parameter(torch.zeros((1, 3, self.hidden)))
+        self.decoder_att_norm = nn.LayerNorm(self.hidden)
+        self.dec_increase_hidden = nn.Linear(self.hidden, self.hidden * 2)
+        self.dec_decrease_hidden = nn.Linear(2 * self.hidden, self.hidden)
+        self.dec_layer_norm = nn.LayerNorm(self.hidden)
+
         self.decoder_dense = nn.Linear(self.hidden, self.max_len + 1)
 
         if use_multihead:
             self.enc_mult_att = nn.ModuleList([
                 MultiHeadAttention(self.heads, self.hidden)
                 for i in range(self.enc_layers)
-            ])
+            ])      
             self.enc_dec_mult_att = MultiHeadAttention(self.heads, self.hidden)
 
-    def forward(self, x):
-        encoding = self.base_enc_layer(x)
+    def forward(self, x): # (13, 3)
+        encoding = self.base_enc_layer(x) # (13, 64)
 
         if self.pos_enc:
-            # Add positional encodings
-            encoding += self.input_pos_enc
+            encoding = encoding + self.input_pos_enc
 
         for i in range(self.enc_layers):
+            qkv = encoding
             if self.use_multihead:
                 encoding, _ = self.enc_mult_att[i](encoding, encoding, encoding)
+                
+                add = encoding + qkv
+                add_and_norm = self.enc_layer_att_norm[i](add)
+                encoding = add_and_norm
             else:
                 encoding, _ = self.attention(encoding, encoding, encoding)
-            dense = F.relu(self.enc_increase_hidden[i](encoding))
+
+            dense = F.relu(self.enc_increase_hidden[i](encoding)) # Feed Forward
             encoding = encoding + self.enc_decrease_hidden[i](dense)
             encoding = self.enc_layer_norm[i](encoding)
 
-        if self.use_multihead:
+        query = self.decoder_input.repeat(x.shape[0], 1, 1)
+        if self.use_multihead:            
             decoding, attention_weights = self.enc_dec_mult_att(
                 self.decoder_input.repeat(x.shape[0], 1, 1),
                 encoding,
-                encoding)
+                encoding
+            )
+            
+            add = decoding + query
+            add_and_norm = self.decoder_att_norm(add)
+            decoding = add_and_norm              
         else:
             decoding, attention_weights = self.attention(
-                self.decoder_input.repeat(x.shape[0], 1, 1),
+                query,
                 encoding,
                 encoding)
-        decoding = self.decoder_dense(decoding)
+            
+        query = decoding
+        decoding = self.dec_decrease_hidden(F.relu(self.dec_increase_hidden(decoding))) # Feed Forward
+        add = query + decoding
+        add_and_norm = self.dec_layer_norm(add)
+        decoding = self.decoder_dense(add_and_norm)
 
         return decoding, attention_weights, self.input_pos_enc
 
@@ -157,56 +181,59 @@ class AttentionModel(nn.Module):
 
         return output, attention_weights
 
+def scaled_dot_product_attention(query, key, value):
+    d_k = query.shape[-1] # 64
+    scaling_factor = torch.tensor(np.sqrt(d_k)) # 8
+    dot_product = torch.bmm(
+        query, key.transpose(1, 2) # (1, 3, 64) x (1, 64, 10) = (1, 3, 10)
+    ) 
+    scaled_dot_product = dot_product / scaling_factor
 
+    attention_weights = F.softmax(scaled_dot_product, dim=2)
+    weighted_sum = torch.bmm(attention_weights, value) # (1, 3, 10) x (1, 10, 64) = (1, 3, 64)
+
+    return weighted_sum, attention_weights 
+    
 class MultiHeadAttention(nn.Module):
-    ''' Multi-Head Attention module '''
-
-    def __init__(self, h, hidden):
+    def __init__(self, num_heads=6, hidden=64):
         super().__init__()
-
-        self.h = h
+        self.num_heads = num_heads
         self.hidden = hidden
 
-        self.W_query = nn.Parameter(torch.normal(
-            mean=torch.zeros((self.hidden, self.hidden)),
-            std=1e-2))
-        self.W_key = nn.Parameter(torch.normal(
-            mean=torch.zeros((self.hidden, self.hidden)),
-            std=1e-2))
-        self.W_value = nn.Parameter(torch.normal(
-            mean=torch.zeros((self.hidden, self.hidden)),
-            std=1e-2))
-        self.W_output = nn.Parameter(torch.normal(
-            mean=torch.zeros((self.hidden, self.hidden)),
-            std=1e-2))
+        # W as in Weight tensor
+        self.W_q = nn.Linear(hidden, hidden)
+        self.W_k = nn.Linear(hidden, hidden)
+        self.W_v = nn.Linear(hidden, hidden)
+        self.W_output = nn.Linear(hidden, hidden)
 
-        self.layer_norm = nn.LayerNorm(self.hidden)
+        self.d_v = int(hidden / num_heads) # == d_q == d_k == 64 / 4 = 16
 
-    def forward(self, query, key, value):
-        chunk_size = int(self.hidden/self.h)
+    def forward(self, query, key, value): # encoding: (13, 64), decoding: query=(3, 64)           
+        heads = [None] * self.num_heads # create an empty array of size num_heads
+        attention_weights = [None] * self.num_heads # for visualization
+        
+        W_query_projected = self.W_q(query) # (13, 64)
+        W_query_split = W_query_projected.split(split_size=self.d_v, dim=-1) # (4, (batch_size, 13, 16))
+        W_key_projected = self.W_k(key)
+        W_key_split = W_key_projected.split(split_size=self.d_v, dim=-1)
+        W_value_projected = self.W_v(value)
+        W_value_split = W_value_projected.split(split_size=self.d_v, dim=-1)
 
-        multi_query = torch.matmul(query, self.W_query)\
-            .split(split_size=chunk_size, dim=-1)
-        multi_query = torch.stack(multi_query, dim=0)
+        for i in range(self.num_heads):
+            weighted_sum, attention_weight  = scaled_dot_product_attention(
+                W_query_split[i], # (13, 16)
+                W_key_split[i],
+                W_value_split[i],
+            ) # page 5 of Vaswani et al. (2017)
 
-        multi_key = torch.matmul(key, self.W_key)\
-            .split(split_size=chunk_size, dim=-1)
-        multi_key = torch.stack(multi_key, dim=0)
+            heads[i] = weighted_sum # (13, 16)
+            attention_weights[i] = attention_weight # for visualization
+        
+        concat = torch.cat(heads, dim=-1) # (13, 64)
+        linear = self.W_output(concat) # (13, 64)
 
-        multi_value = torch.matmul(value, self.W_value)\
-            .split(split_size=chunk_size, dim=-1)
-        multi_value = torch.stack(multi_value, dim=0)
+        output = linear
 
-        scaling_factor = torch.tensor(np.sqrt(multi_query.shape[-1]))
-        dotp = torch.matmul(multi_query, multi_key.transpose(2, 3)) / scaling_factor
-        attention_weights = F.softmax(dotp, dim=-1)
-
-        weighted_sum = torch.matmul(attention_weights, multi_value)
-        weighted_sum = weighted_sum.split(1, dim=0)
-        weighted_sum = torch.cat(weighted_sum, dim=-1).squeeze()
-
-        output = weighted_sum + query
-        output = self.layer_norm(output)
         return output, attention_weights
 
 
@@ -214,7 +241,7 @@ def train(max_len=10,
           vocab_size=3,
           hidden=64,
           pos_enc=True,
-          enc_layers=1,
+          enc_layers=2,
           use_multihead=True,
           heads=4,
           batchsize=100,
@@ -262,7 +289,7 @@ def test(max_len=10,
          vocab_size=3,
          hidden=64,
          pos_enc=True,
-         enc_layers=1,
+         enc_layers=2,
          use_multihead=True,
          heads=4,
          savepath='models/',
@@ -283,7 +310,6 @@ def test(max_len=10,
         predictions, attention, input_pos_enc = model(torch.Tensor(samples))
     predictions = predictions.detach().numpy()
     predictions = predictions.argmax(axis=2)
-    attention = attention.detach().numpy()
 
     print("\nPrediction: \n{}".format(predictions))
     print("\nEncoder-Decoder Attention: ")

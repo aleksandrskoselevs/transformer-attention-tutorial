@@ -6,6 +6,8 @@ At the end of Task 1, we mentioned that the order of the input sequence does not
 
 Here, we consider a task where the order of the input sequence is paramount. Specifically, the first step of the input sequence acts as a signal to tell the model which letter to count.
 
+_*step = position in the array_
+
 The output is a sequence of a single step, which represents the count of the letter specified by the signal.
 
 For instance, if the first step (signal) is 'A', the model should output the counts of 'A's, not including the signal. 
